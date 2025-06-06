@@ -48,9 +48,10 @@ use restate_types::identifiers::{
 };
 use restate_types::invocation::client::{InvocationOutput, InvocationOutputResponse};
 use restate_types::invocation::{
-    AttachInvocationRequest, InvocationQuery, InvocationTarget, InvocationTargetType,
-    NotifySignalRequest, ResponseResult, ServiceInvocation, ServiceInvocationResponseSink,
-    SubmitNotificationSink, WorkflowHandlerType,
+    AttachInvocationRequest, IngressInvocationResponseSink, InvocationMutationResponseSink,
+    InvocationQuery, InvocationTarget, InvocationTargetType, InvocationTermination,
+    NotifySignalRequest, PurgeInvocationRequest, ResponseResult, ServiceInvocation,
+    ServiceInvocationResponseSink, SubmitNotificationSink, TerminationFlavor, WorkflowHandlerType,
 };
 use restate_types::logs::MatchKeyQuery;
 use restate_types::logs::{KeyFilter, Lsn, SequenceNumber};
@@ -175,6 +176,17 @@ where
                 );
                 esn.leader_epoch
             });
+
+        if let Some(last_leader_epoch) = last_seen_leader_epoch {
+            replica_set_states.note_observed_leader(
+                partition_id,
+                restate_types::partitions::state::LeadershipState {
+                    current_leader_epoch: last_leader_epoch,
+                    // we don't know the old leader node-id, another node might update it
+                    current_leader: GenerationalNodeId::INVALID,
+                },
+            );
+        }
 
         let leadership_state = LeadershipState::new(
             PartitionProcessorMetadata::new(partition_id, partition_key_range.clone()),
@@ -737,6 +749,68 @@ where
                         response_tx,
                     )
                     .await;
+            }
+            PartitionProcessorRpcRequestInner::CancelInvocation { invocation_id } => {
+                self.leadership_state
+                    .handle_rpc_proposal_command(
+                        request_id,
+                        response_tx,
+                        invocation_id.partition_key(),
+                        Command::TerminateInvocation(InvocationTermination {
+                            invocation_id,
+                            flavor: TerminationFlavor::Cancel,
+                            response_sink: Some(InvocationMutationResponseSink::Ingress(
+                                IngressInvocationResponseSink { request_id },
+                            )),
+                        }),
+                    )
+                    .await
+            }
+            PartitionProcessorRpcRequestInner::KillInvocation { invocation_id } => {
+                self.leadership_state
+                    .handle_rpc_proposal_command(
+                        request_id,
+                        response_tx,
+                        invocation_id.partition_key(),
+                        Command::TerminateInvocation(InvocationTermination {
+                            invocation_id,
+                            flavor: TerminationFlavor::Kill,
+                            response_sink: Some(InvocationMutationResponseSink::Ingress(
+                                IngressInvocationResponseSink { request_id },
+                            )),
+                        }),
+                    )
+                    .await
+            }
+            PartitionProcessorRpcRequestInner::PurgeInvocation { invocation_id } => {
+                self.leadership_state
+                    .handle_rpc_proposal_command(
+                        request_id,
+                        response_tx,
+                        invocation_id.partition_key(),
+                        Command::PurgeInvocation(PurgeInvocationRequest {
+                            invocation_id,
+                            response_sink: Some(InvocationMutationResponseSink::Ingress(
+                                IngressInvocationResponseSink { request_id },
+                            )),
+                        }),
+                    )
+                    .await
+            }
+            PartitionProcessorRpcRequestInner::PurgeJournal { invocation_id } => {
+                self.leadership_state
+                    .handle_rpc_proposal_command(
+                        request_id,
+                        response_tx,
+                        invocation_id.partition_key(),
+                        Command::PurgeJournal(PurgeInvocationRequest {
+                            invocation_id,
+                            response_sink: Some(InvocationMutationResponseSink::Ingress(
+                                IngressInvocationResponseSink { request_id },
+                            )),
+                        }),
+                    )
+                    .await
             }
         };
     }

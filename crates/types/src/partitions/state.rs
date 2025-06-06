@@ -16,10 +16,11 @@ use tokio::sync::{Notify, watch};
 
 use restate_encoding::NetSerde;
 
+use crate::cluster_state::ClusterState;
 use crate::identifiers::{LeaderEpoch, PartitionId};
 use crate::logs::{Lsn, SequenceNumber};
 use crate::partitions::PartitionConfiguration;
-use crate::{GenerationalNodeId, Merge, PlainNodeId, Version};
+use crate::{GenerationalNodeId, Merge, NodeId, PlainNodeId, Version};
 
 type DashMap<K, V> = dashmap::DashMap<K, V, ahash::RandomState>;
 
@@ -93,6 +94,44 @@ impl PartitionReplicaSetStates {
                 true
             }
         };
+
+        if modified {
+            self.inner.global_notify.notify_waiters();
+        }
+    }
+
+    pub fn note_durable_lsn(
+        &self,
+        partition_id: PartitionId,
+        node_id: PlainNodeId,
+        durable_lsn: Lsn,
+    ) {
+        let Some(mut state) = self.inner.partitions.get_mut(&partition_id) else {
+            return;
+        };
+        let mut modified = false;
+
+        // update durable lsn in members of current and/or next
+        for member in state
+            .value_mut()
+            .observed_current_membership
+            .members
+            .iter_mut()
+        {
+            if member.node_id == node_id && durable_lsn > member.durable_lsn {
+                member.durable_lsn = durable_lsn;
+                modified |= true;
+            }
+        }
+
+        if let Some(next_membership) = state.value_mut().observed_next_membership.as_mut() {
+            for member in next_membership.members.iter_mut() {
+                if member.node_id == node_id && durable_lsn > member.durable_lsn {
+                    member.durable_lsn = durable_lsn;
+                    modified |= true;
+                }
+            }
+        }
 
         if modified {
             self.inner.global_notify.notify_waiters();
@@ -207,6 +246,7 @@ impl MembershipState {
         {
             // we have a new current membership
             std::cmp::Ordering::Greater => {
+                // todo: try to use previous durable lsns if the two replica-sets intersect
                 self.observed_current_membership = incoming_current_membership.clone();
                 modified = true;
                 if self
@@ -285,6 +325,16 @@ impl MembershipState {
 
     pub fn watch_current_leader(&self) -> watch::Receiver<LeadershipState> {
         self.current_leader.subscribe()
+    }
+
+    /// Returns the first alive node from `observed_current_membership` by overlaying it with the
+    /// current cluster state.
+    pub fn first_alive_node(&self, cluster_state: &ClusterState) -> Option<NodeId> {
+        self.observed_current_membership
+            .members
+            .iter()
+            .map(|member| NodeId::from(member.node_id))
+            .find(|node_id| cluster_state.is_alive(*node_id))
     }
 }
 

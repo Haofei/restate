@@ -16,35 +16,45 @@ use datafusion::logical_expr::Expr;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::physical_plan::stream::RecordBatchReceiverStream;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::watch;
 
-use restate_types::cluster::cluster_state::ClusterState;
+use restate_core::Metadata;
+use restate_types::cluster_state::ClusterState;
+use restate_types::partition_table::PartitionTable;
+use restate_types::partitions::state::PartitionReplicaSetStates;
 
 use crate::context::QueryContext;
 use crate::table_providers::{GenericTableProvider, Scan};
 use crate::table_util::Builder;
 
-use super::row::append_node_row;
-use super::schema::NodeStateBuilder;
+use super::row::append_replica_set_row;
+use super::schema::PartitionReplicaSetBuilder;
 
 pub fn register_self(
     ctx: &QueryContext,
-    watch: watch::Receiver<Arc<ClusterState>>,
+    metadata: Metadata,
+    cluster_state: ClusterState,
+    replica_set_states: PartitionReplicaSetStates,
 ) -> datafusion::common::Result<()> {
-    let table = GenericTableProvider::new(
-        NodeStateBuilder::schema(),
-        Arc::new(NodesStatusScanner { watch }),
+    let replica_set_table = GenericTableProvider::new(
+        PartitionReplicaSetBuilder::schema(),
+        Arc::new(ReplicaSetScanner {
+            metadata,
+            replica_set_states,
+            cluster_state,
+        }),
     );
-    ctx.register_non_partitioned_table("node_state", Arc::new(table))
+    ctx.register_non_partitioned_table("partition_replica_set", Arc::new(replica_set_table))
 }
 
 #[derive(Clone, derive_more::Debug)]
-#[debug("DeploymentMetadataScanner")]
-struct NodesStatusScanner {
-    watch: watch::Receiver<Arc<ClusterState>>,
+#[debug("ReplicaSetScanner")]
+struct ReplicaSetScanner {
+    metadata: Metadata,
+    replica_set_states: PartitionReplicaSetStates,
+    cluster_state: ClusterState,
 }
 
-impl Scan for NodesStatusScanner {
+impl Scan for ReplicaSetScanner {
     fn scan(
         &self,
         projection: SchemaRef,
@@ -52,27 +62,48 @@ impl Scan for NodesStatusScanner {
         _limit: Option<usize>,
     ) -> SendableRecordBatchStream {
         let schema = projection.clone();
+        let partition_table = self.metadata.partition_table_snapshot();
+
         let mut stream_builder = RecordBatchReceiverStream::builder(projection, 2);
         let tx = stream_builder.tx();
 
-        let current = self.watch.borrow().clone();
+        let cluster_state = self.cluster_state.clone();
+        let replica_set_states = self.replica_set_states.clone();
         stream_builder.spawn(async move {
-            for_each_state(schema, tx, &current).await;
+            for_each_partition(
+                schema,
+                tx,
+                partition_table,
+                cluster_state,
+                replica_set_states,
+            )
+            .await;
             Ok(())
         });
         stream_builder.build()
     }
 }
 
-async fn for_each_state(
+async fn for_each_partition(
     schema: SchemaRef,
     tx: Sender<datafusion::common::Result<RecordBatch>>,
-    cluster_state: &ClusterState,
+    partition_table: Arc<PartitionTable>,
+    cluster_state: ClusterState,
+    replica_set_states: PartitionReplicaSetStates,
 ) {
-    let mut builder = NodeStateBuilder::new(schema.clone());
+    let mut builder = PartitionReplicaSetBuilder::new(schema.clone());
+
     let mut output = String::new();
-    for (id, node_state) in cluster_state.nodes.iter() {
-        append_node_row(&mut builder, &mut output, *id, node_state);
+    for (_, partition) in partition_table.iter() {
+        let membership = replica_set_states.membership_state(partition.partition_id);
+        append_replica_set_row(
+            &mut builder,
+            &mut output,
+            membership,
+            &cluster_state,
+            partition,
+        );
+
         if builder.full() {
             let batch = builder.finish();
             if tx.send(batch).await.is_err() {
@@ -81,9 +112,10 @@ async fn for_each_state(
                 // we probably don't want to panic, is it will cause the entire process to exit
                 return;
             }
-            builder = NodeStateBuilder::new(schema.clone());
+            builder = PartitionReplicaSetBuilder::new(schema.clone());
         }
     }
+
     if !builder.empty() {
         let result = builder.finish();
         let _ = tx.send(result).await;

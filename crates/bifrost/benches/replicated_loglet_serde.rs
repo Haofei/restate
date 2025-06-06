@@ -29,7 +29,7 @@ use restate_storage_api::deduplication_table::{DedupInformation, EpochSequenceNu
 use restate_types::GenerationalNodeId;
 use restate_types::identifiers::{InvocationId, LeaderEpoch, PartitionProcessorRpcRequestId};
 use restate_types::invocation::{
-    InvocationTarget, ServiceInvocation, ServiceInvocationSpanContext,
+    InvocationTarget, RestateVersion, ServiceInvocation, ServiceInvocationSpanContext,
 };
 use restate_types::journal_v2::CommandType;
 use restate_types::journal_v2::raw::{RawCommand, RawEntry, RawEntryHeader, RawEntryInner};
@@ -95,6 +95,7 @@ fn invoke_cmd() -> Command {
         submit_notification_sink: Some(
             restate_types::invocation::SubmitNotificationSink::Ingress { request_id },
         ),
+        restate_version: RestateVersion::current(),
     })
 }
 
@@ -204,7 +205,7 @@ fn serialize_append_message(payloads: Arc<[Record]>) -> anyhow::Result<Message> 
             segment_index: 2.into(),
             loglet_id: LogletId::new(12u16.into(), 4.into()),
         },
-        payloads,
+        payloads: payloads.into(),
     };
 
     let body = Body::Datagram(Datagram {

@@ -8,8 +8,6 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-#![allow(dead_code)]
-
 use crate::table_macro::*;
 
 use datafusion::arrow::datatypes::DataType;
@@ -92,6 +90,9 @@ define_table!(sys_invocation_status(
 
     /// Timestamp indicating the start of this invocation.
     created_at: TimestampMillisecond,
+
+    /// restate-server version in use when this invocation was created.
+    created_using_restate_version: DataType::LargeUtf8,
 
     /// Timestamp indicating the last invocation status transition. For example, last time the
     /// status changed from `invoked` to `suspended`.

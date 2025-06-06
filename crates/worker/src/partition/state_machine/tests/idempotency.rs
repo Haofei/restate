@@ -233,10 +233,11 @@ async fn complete_already_completed_invocation() {
         &invocation_id,
         &InvocationStatus::Completed(CompletedInvocation {
             invocation_target: invocation_target.clone(),
+            created_using_restate_version: RestateVersion::current(),
             source: Source::Ingress(PartitionProcessorRpcRequestId::new()),
             execution_time: None,
             idempotency_key: Some(idempotency_key.clone()),
-            timestamps: StatusTimestamps::now(),
+            timestamps: StatusTimestamps::mock(),
             response_result: ResponseResult::Success(response_bytes.clone()),
             completion_retention_duration: Default::default(),
             journal_retention_duration: Default::default(),
@@ -768,6 +769,7 @@ async fn purge_completed_idempotent_invocation() {
     let _ = test_env
         .apply(Command::PurgeInvocation(PurgeInvocationRequest {
             invocation_id,
+            response_sink: None,
         }))
         .await;
     assert_that!(

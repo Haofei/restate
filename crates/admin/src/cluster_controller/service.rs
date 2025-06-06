@@ -8,7 +8,10 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-mod state;
+mod cluster_controller_state;
+mod scheduler;
+mod scheduler_task;
+mod trim_logs_task;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,7 +36,7 @@ use restate_core::{Metadata, MetadataWriter, ShutdownError, TaskCenter, TaskKind
 use restate_metadata_store::ReadModifyWriteError;
 use restate_storage_query_datafusion::BuildError;
 use restate_storage_query_datafusion::context::{ClusterTables, QueryContext};
-use restate_types::cluster::cluster_state::ClusterState;
+use restate_types::cluster::cluster_state::LegacyClusterState;
 use restate_types::config::{AdminOptions, Configuration};
 use restate_types::health::HealthStatus;
 use restate_types::identifiers::PartitionId;
@@ -43,21 +46,21 @@ use restate_types::logs::metadata::{
     ReplicatedLogletConfig, SegmentIndex,
 };
 use restate_types::logs::{LogId, LogletId, Lsn};
+use restate_types::net::node::NodeState;
 use restate_types::net::partition_processor_manager::{CreateSnapshotRequest, Snapshot};
-use restate_types::nodes_config::{NodeConfig, NodesConfiguration, StorageState};
+use restate_types::nodes_config::{NodesConfiguration, StorageState};
 use restate_types::partition_table::{
     self, PartitionReplication, PartitionTable, PartitionTableBuilder,
 };
-use restate_types::partitions::state::PartitionReplicaSetStates;
+use restate_types::partitions::state::{MembershipState, PartitionReplicaSetStates};
 use restate_types::protobuf::common::AdminStatus;
 use restate_types::replicated_loglet::ReplicatedLogletParams;
 use restate_types::replication::{NodeSet, ReplicationProperty};
-use restate_types::{GenerationalNodeId, NodeId, PlainNodeId, Version};
+use restate_types::{GenerationalNodeId, NodeId, Version};
 
-use self::state::ClusterControllerState;
-use super::cluster_state_refresher::ClusterStateRefresher;
-use super::grpc_svc_handler::ClusterCtrlSvcHandler;
-use crate::cluster_controller::observed_cluster_state::ObservedClusterState;
+use crate::cluster_controller::cluster_state_refresher::ClusterStateRefresher;
+use crate::cluster_controller::grpc_svc_handler::ClusterCtrlSvcHandler;
+use crate::cluster_controller::service::cluster_controller_state::ClusterControllerState;
 
 #[derive(Debug, thiserror::Error, CodedError)]
 pub enum Error {
@@ -79,7 +82,6 @@ pub struct Service<T> {
     command_rx: mpsc::Receiver<ClusterControllerCommand>,
     health_status: HealthStatus<AdminStatus>,
     heartbeat_interval: Interval,
-    observed_cluster_state: ObservedClusterState,
 }
 
 impl<T> Service<T>
@@ -107,7 +109,10 @@ where
 
         let cluster_query_context = QueryContext::create(
             &options.admin.query_engine,
-            ClusterTables::new(cluster_state_refresher.cluster_state_watcher().watch()),
+            ClusterTables::new(
+                replica_set_states.clone(),
+                cluster_state_refresher.cluster_state_watcher().watch(),
+            ),
         )
         .await?;
 
@@ -141,7 +146,6 @@ where
             command_tx,
             command_rx,
             heartbeat_interval,
-            observed_cluster_state: ObservedClusterState::default(),
         })
     }
 
@@ -168,7 +172,7 @@ pub struct ChainExtension {
 
 #[derive(Debug)]
 enum ClusterControllerCommand {
-    GetClusterState(oneshot::Sender<Arc<ClusterState>>),
+    GetClusterState(oneshot::Sender<Arc<LegacyClusterState>>),
     TrimLog {
         log_id: LogId,
         trim_point: Lsn,
@@ -198,7 +202,7 @@ pub struct ClusterControllerHandle {
 }
 
 impl ClusterControllerHandle {
-    pub async fn get_cluster_state(&self) -> Result<Arc<ClusterState>, ShutdownError> {
+    pub async fn get_cluster_state(&self) -> Result<Arc<LegacyClusterState>, ShutdownError> {
         let (response_tx, response_rx) = oneshot::channel();
         // ignore the error, we own both tx and rx at this point.
         let _ = self
@@ -326,16 +330,15 @@ impl<T: TransportConnect> Service<T> {
 
     async fn run_inner(mut self) -> Never {
         let mut config_watcher = Configuration::watcher();
-        let mut cluster_state_watcher = self.cluster_state_refresher.cluster_state_watcher();
 
-        let mut state: ClusterControllerState<T> = ClusterControllerState::Follower;
+        let mut state = ClusterControllerState::Follower;
 
         let cs = TaskCenter::with_current(|tc| tc.cluster_state().clone());
         let mut cs_changed = std::pin::pin!(cs.changed());
         let mut nodes_config = Metadata::with_current(|m| m.updateable_nodes_config());
 
         // initialize the state based on the initial cluster state
-        state.update(&self, nodes_config.live_load(), &cs);
+        state.update(&self, nodes_config.live_load(), &cs).await;
 
         loop {
             tokio::select! {
@@ -348,21 +351,8 @@ impl<T: TransportConnect> Service<T> {
                     cs_changed.set(cs.changed());
 
                     let nodes_config = nodes_config.live_load();
-                    state.update(&self, nodes_config, &cs);
-
-                    self.observed_cluster_state.update_liveness(&cs);
-                    if let Err(err) = state.on_observed_cluster_state(&self.observed_cluster_state, nodes_config).await {
-                        warn!(%err, "Failed to handle observed cluster state. This can impair the overall cluster operations");
-                    }
+                    state.update(&self, nodes_config, &cs).await;
                 },
-                Ok(cluster_state) = cluster_state_watcher.next_cluster_state() => {
-                    let nodes_config = nodes_config.live_load();
-                    self.observed_cluster_state.update_partitions(&cluster_state);
-
-                    if let Err(err) = state.on_observed_cluster_state(&self.observed_cluster_state, nodes_config).await {
-                        warn!(%err, "Failed to handle observed cluster state. This can impair the overall cluster operations");
-                    }
-                }
                 Some(cmd) = self.command_rx.recv() => {
                     // it is still safe to handle cluster commands as a follower
                     self.on_cluster_cmd(cmd).await;
@@ -371,15 +361,6 @@ impl<T: TransportConnect> Service<T> {
                     debug!("Updating the cluster controller settings.");
                     let configuration = self.configuration.live_load();
                     self.heartbeat_interval = Self::create_heartbeat_interval(&configuration.admin);
-                    state.reconfigure(configuration);
-                }
-                leader_event = state.run() => {
-                    if let Err(err) = state.on_leader_event(&self.observed_cluster_state, leader_event).await {
-                        warn!(
-                            %err,
-                            "Failed to handle leader event. This can impair the overall cluster operations"
-                        );
-                    }
                 }
             }
         }
@@ -521,8 +502,17 @@ impl<T: TransportConnect> Service<T> {
                 extension,
                 response_tx,
             } => {
+                let membership_state = Metadata::with_current(|metadata| {
+                    metadata
+                        .partition_table_ref()
+                        .iter()
+                        .find(|(_, partition)| partition.log_id() == log_id)
+                        .map(|(partition_id, _)| *partition_id)
+                })
+                .map(|partition_id| self.replica_set_states.membership_state(partition_id))
+                .unwrap_or_default();
+
                 let bifrost = self.bifrost.clone();
-                let observed_cluster_state = self.observed_cluster_state.clone();
 
                 // receiver will get error if response_tx is dropped
                 _ = TaskCenter::spawn(TaskKind::Disposable, "seal-and-extend", async move {
@@ -531,7 +521,7 @@ impl<T: TransportConnect> Service<T> {
                         extension,
                         min_version,
                         bifrost,
-                        observed_cluster_state,
+                        membership_state,
                     }
                     .run()
                     .await;
@@ -684,7 +674,7 @@ struct SealAndExtendTask {
     min_version: Version,
     extension: Option<ChainExtension>,
     bifrost: Bifrost,
-    observed_cluster_state: ObservedClusterState,
+    membership_state: MembershipState,
 }
 
 impl SealAndExtendTask {
@@ -765,12 +755,18 @@ impl SealAndExtendTask {
             .as_ref()
             .and_then(|ext| ext.sequencer)
             .or_else(|| {
-                Metadata::with_current(|m| {
-                    let partition_id = PartitionId::from(self.log_id);
-                    m.partition_table_snapshot()
-                        .get(&partition_id)
-                        .and_then(|partition| partition.placement.leader().map(NodeId::from))
-                })
+                if self.membership_state.current_leader().current_leader
+                    != GenerationalNodeId::INVALID
+                {
+                    Some(NodeId::from(
+                        self.membership_state.current_leader().current_leader,
+                    ))
+                } else {
+                    TaskCenter::with_current(|handle| {
+                        self.membership_state
+                            .first_alive_node(handle.cluster_state())
+                    })
+                }
             });
 
         let (provider, params) = match &provider_config {
@@ -788,7 +784,6 @@ impl SealAndExtendTask {
                     config,
                     next_loglet_id,
                     &Metadata::with_current(|m| m.nodes_config_ref()),
-                    &self.observed_cluster_state,
                     preferred_nodes,
                     preferred_sequencer,
                 )
@@ -812,7 +807,6 @@ pub fn build_new_replicated_loglet_configuration(
     replicated_loglet_config: &ReplicatedLogletConfig,
     loglet_id: LogletId,
     nodes_config: &NodesConfiguration,
-    observed_cluster_state: &ObservedClusterState,
     preferred_nodes: Option<&NodeSet>,
     preferred_sequencer: Option<NodeId>,
 ) -> Option<ReplicatedLogletParams> {
@@ -824,14 +818,25 @@ pub fn build_new_replicated_loglet_configuration(
     let replication = replicated_loglet_config.replication_property.clone();
 
     let sequencer = preferred_sequencer
-        .and_then(|node_id| observed_cluster_state.alive_generation(node_id))
-        .or_else(|| {
-            // we can place the sequencer on any alive node
-            observed_cluster_state
-                .alive_nodes()
+        .and_then(|node_id| {
+            TaskCenter::with_current(|h| {
+                h.cluster_state()
+                    .get_node_state_and_generation(node_id.id())
+                    .and_then(|(node_id, node_state)| {
+                        (node_state == NodeState::Alive).then_some(node_id)
+                    })
+            })
+        })
+        .or_else(||
+        // choose any alive node if no preferred sequencer was specified
+        TaskCenter::with_current(|h| {
+            h.cluster_state()
+                .all()
+                .into_iter()
+                .filter(|(_, node_state)| *node_state == NodeState::Alive)
+                .map(|(node_id, _)| node_id)
                 .choose(&mut rng)
-                .cloned()
-        })?;
+        }))?;
 
     let opts = NodeSetSelectorOptions::new(u32::from(log_id) as u64)
         .with_target_size(replicated_loglet_config.target_nodeset_size)
@@ -842,7 +847,12 @@ pub fn build_new_replicated_loglet_configuration(
         nodes_config,
         &replication,
         restate_types::replicated_loglet::logserver_candidate_filter,
-        logserver_writeable_node_filter(observed_cluster_state),
+        |_, config| {
+            matches!(
+                config.log_server_config.storage_state,
+                StorageState::ReadWrite
+            )
+        },
         opts,
     );
 
@@ -872,17 +882,6 @@ pub fn build_new_replicated_loglet_configuration(
             warn!(?log_id, "Cannot select node-set for log: {err}");
             None
         }
-    }
-}
-
-fn logserver_writeable_node_filter(
-    observed_cluster_state: &ObservedClusterState,
-) -> impl Fn(PlainNodeId, &NodeConfig) -> bool + '_ {
-    |node_id: PlainNodeId, config: &NodeConfig| {
-        matches!(
-            config.log_server_config.storage_state,
-            StorageState::ReadWrite
-        ) && observed_cluster_state.alive_generation(node_id).is_some()
     }
 }
 
@@ -1474,7 +1473,7 @@ mod tests {
                     .roles(Role::Admin | Role::Worker)
                     .build(),
             );
-            write_guard.upsert_node_state(node_id, restate_core::cluster_state::NodeState::Alive);
+            write_guard.upsert_node_state(node_id, restate_types::cluster_state::NodeState::Alive);
         }
         let builder = modify_builder(builder.set_nodes_config(nodes_config));
 
