@@ -144,6 +144,7 @@ message InvocationStatusV2 {
   repeated ServiceInvocationResponseSink response_sinks = 7;
   Duration completion_retention_duration = 11;
   Duration journal_retention_duration = 29;
+  string created_using_restate_version = 30;
 
   // Timestamps
   uint64 creation_time = 5;
@@ -333,6 +334,7 @@ message ServiceInvocation {
   optional string idempotency_key = 10;
   SubmitNotificationSink submit_notification_sink = 11;
   Duration journal_retention_duration = 12;
+  string restate_version = 13;
 }
 
 message StateMutation {
@@ -518,11 +520,6 @@ message JournalEntry {
 
 // -------- Entry V2 --------
 message Entry {
-  message EventEntry {
-    string ty = 1;
-    map<string, string> metadata = 2;
-  }
-
   message CallOrSendCommandMetadata {
     InvocationId invocation_id = 1;
     InvocationTarget invocation_target = 2;
@@ -569,8 +566,8 @@ message Entry {
   }
 
   EntryType ty = 3;
-  // For Event ty, this contains the EventEntry,
-  // otherwise the content depends on the RawEntry Encoder/Decoder.
+
+  // The content depends on the RawEntry Encoder/Decoder.
   bytes content = 4;
 
   // Additional metadata for all entries
@@ -585,6 +582,15 @@ message Entry {
     uint32 signal_idx = 8;
     string signal_name = 9;
   }
+
+  enum EventType {
+    UNKNOWN_EVENT = 0;
+    TRANSIENT_ERROR = 1;
+  }
+
+  // Additional metadata for EVENT
+  EventType event_type = 10;
+  optional bytes event_deduplication_hash = 11;
 }
 
 message ResponseResult {

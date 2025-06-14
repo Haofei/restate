@@ -48,9 +48,10 @@ use restate_types::identifiers::{
 };
 use restate_types::invocation::client::{InvocationOutput, InvocationOutputResponse};
 use restate_types::invocation::{
-    AttachInvocationRequest, InvocationQuery, InvocationTarget, InvocationTargetType,
-    NotifySignalRequest, ResponseResult, ServiceInvocation, ServiceInvocationResponseSink,
-    SubmitNotificationSink, WorkflowHandlerType,
+    AttachInvocationRequest, IngressInvocationResponseSink, InvocationMutationResponseSink,
+    InvocationQuery, InvocationTarget, InvocationTargetType, InvocationTermination,
+    NotifySignalRequest, PurgeInvocationRequest, ResponseResult, ServiceInvocation,
+    ServiceInvocationResponseSink, SubmitNotificationSink, TerminationFlavor, WorkflowHandlerType,
 };
 use restate_types::logs::MatchKeyQuery;
 use restate_types::logs::{KeyFilter, Lsn, SequenceNumber};
@@ -176,6 +177,17 @@ where
                 esn.leader_epoch
             });
 
+        if let Some(last_leader_epoch) = last_seen_leader_epoch {
+            replica_set_states.note_observed_leader(
+                partition_id,
+                restate_types::partitions::state::LeadershipState {
+                    current_leader_epoch: last_leader_epoch,
+                    // we don't know the old leader node-id, another node might update it
+                    current_leader: GenerationalNodeId::INVALID,
+                },
+            );
+        }
+
         let leadership_state = LeadershipState::new(
             PartitionProcessorMetadata::new(partition_id, partition_key_range.clone()),
             num_timers_in_memory_limit,
@@ -260,7 +272,7 @@ pub enum ProcessorError {
     Other(#[from] anyhow::Error),
 }
 
-type LsnEnvelope = (Lsn, Arc<Envelope>);
+type LsnEnvelope = (Lsn, Envelope);
 
 impl<InvokerSender> PartitionProcessor<InvokerSender>
 where
@@ -418,7 +430,7 @@ where
                             record_write_to_read_latency.record(record.created_at().elapsed());
                         });
                         entry
-                            .try_decode_arc::<Envelope>()
+                            .try_decode::<Envelope>()
                             .map(|envelope| Ok((lsn, envelope?)))
                             .expect("data record is present")
                     } else {
@@ -544,7 +556,7 @@ where
                                     self.status.last_observed_leader_node.unwrap_or(GenerationalNodeId::INVALID),
                                 });
 
-                            let is_leader = self.leadership_state.on_announce_leader(announce_leader, &mut partition_store).await?;
+                            let is_leader = self.leadership_state.on_announce_leader(&announce_leader, &mut partition_store).await?;
 
                             Span::current().record("is_leader", is_leader);
 
@@ -621,14 +633,14 @@ where
                 AppendInvocationReplyOn::Appended,
             ) => {
                 let service_invocation = ServiceInvocation::from_request(
-                    invocation_request,
+                    Arc::unwrap_or_clone(invocation_request),
                     invocation::Source::ingress(request_id),
                 );
 
                 self.leadership_state
                     .self_propose_and_respond_asynchronously(
                         service_invocation.partition_key(),
-                        Command::Invoke(service_invocation),
+                        Command::Invoke(Box::new(service_invocation)),
                         response_tx,
                     )
                     .await;
@@ -638,7 +650,7 @@ where
                 AppendInvocationReplyOn::Submitted,
             ) => {
                 let mut service_invocation = ServiceInvocation::from_request(
-                    invocation_request,
+                    Arc::unwrap_or_clone(invocation_request),
                     invocation::Source::ingress(request_id),
                 );
                 service_invocation.submit_notification_sink =
@@ -649,7 +661,7 @@ where
                         request_id,
                         response_tx,
                         service_invocation.partition_key(),
-                        Command::Invoke(service_invocation),
+                        Command::Invoke(Box::new(service_invocation)),
                     )
                     .await
             }
@@ -658,7 +670,7 @@ where
                 AppendInvocationReplyOn::Output,
             ) => {
                 let mut service_invocation = ServiceInvocation::from_request(
-                    invocation_request,
+                    Arc::unwrap_or_clone(invocation_request),
                     invocation::Source::ingress(request_id),
                 );
                 service_invocation.response_sink =
@@ -669,7 +681,7 @@ where
                         request_id,
                         response_tx,
                         service_invocation.partition_key(),
-                        Command::Invoke(service_invocation),
+                        Command::Invoke(Box::new(service_invocation)),
                     )
                     .await
             }
@@ -737,6 +749,68 @@ where
                         response_tx,
                     )
                     .await;
+            }
+            PartitionProcessorRpcRequestInner::CancelInvocation { invocation_id } => {
+                self.leadership_state
+                    .handle_rpc_proposal_command(
+                        request_id,
+                        response_tx,
+                        invocation_id.partition_key(),
+                        Command::TerminateInvocation(InvocationTermination {
+                            invocation_id,
+                            flavor: TerminationFlavor::Cancel,
+                            response_sink: Some(InvocationMutationResponseSink::Ingress(
+                                IngressInvocationResponseSink { request_id },
+                            )),
+                        }),
+                    )
+                    .await
+            }
+            PartitionProcessorRpcRequestInner::KillInvocation { invocation_id } => {
+                self.leadership_state
+                    .handle_rpc_proposal_command(
+                        request_id,
+                        response_tx,
+                        invocation_id.partition_key(),
+                        Command::TerminateInvocation(InvocationTermination {
+                            invocation_id,
+                            flavor: TerminationFlavor::Kill,
+                            response_sink: Some(InvocationMutationResponseSink::Ingress(
+                                IngressInvocationResponseSink { request_id },
+                            )),
+                        }),
+                    )
+                    .await
+            }
+            PartitionProcessorRpcRequestInner::PurgeInvocation { invocation_id } => {
+                self.leadership_state
+                    .handle_rpc_proposal_command(
+                        request_id,
+                        response_tx,
+                        invocation_id.partition_key(),
+                        Command::PurgeInvocation(PurgeInvocationRequest {
+                            invocation_id,
+                            response_sink: Some(InvocationMutationResponseSink::Ingress(
+                                IngressInvocationResponseSink { request_id },
+                            )),
+                        }),
+                    )
+                    .await
+            }
+            PartitionProcessorRpcRequestInner::PurgeJournal { invocation_id } => {
+                self.leadership_state
+                    .handle_rpc_proposal_command(
+                        request_id,
+                        response_tx,
+                        invocation_id.partition_key(),
+                        Command::PurgeJournal(PurgeInvocationRequest {
+                            invocation_id,
+                            response_sink: Some(InvocationMutationResponseSink::Ingress(
+                                IngressInvocationResponseSink { request_id },
+                            )),
+                        }),
+                    )
+                    .await
             }
         };
     }
@@ -812,10 +886,10 @@ where
     async fn apply_record<'a, 'b: 'a>(
         &mut self,
         lsn: Lsn,
-        envelope: Arc<Envelope>,
+        envelope: Envelope,
         transaction: &mut PartitionStoreTransaction<'b>,
         action_collector: &mut ActionCollector,
-    ) -> Result<Option<(Header, AnnounceLeader)>, state_machine::Error> {
+    ) -> Result<Option<(Header, Box<AnnounceLeader>)>, state_machine::Error> {
         transaction.put_applied_lsn(lsn).await?;
 
         // Update replay status
@@ -853,9 +927,6 @@ where
                     .await
                     .map_err(state_machine::Error::Storage)?;
             }
-
-            // todo: check whether it's worth passing the arc further down
-            let envelope = Arc::unwrap_or_clone(envelope);
 
             if let Command::AnnounceLeader(announce_leader) = envelope.command {
                 // leadership change detected, let's finish our transaction here

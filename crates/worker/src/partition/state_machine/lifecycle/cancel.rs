@@ -20,13 +20,17 @@ use restate_storage_api::promise_table::PromiseTable;
 use restate_storage_api::state_table::StateTable;
 use restate_storage_api::timer_table::TimerTable;
 use restate_types::identifiers::InvocationId;
-use restate_types::invocation::{InvocationEpoch, TerminationFlavor};
+use restate_types::invocation::client::CancelInvocationResponse;
+use restate_types::invocation::{
+    InvocationEpoch, InvocationMutationResponseSink, TerminationFlavor,
+};
 use restate_types::journal_v2::CANCEL_SIGNAL;
 use tracing::{debug, trace};
 
 pub struct OnCancelCommand {
     pub invocation_id: InvocationId,
     pub invocation_status: InvocationStatus,
+    pub response_sink: Option<InvocationMutationResponseSink>,
 }
 
 impl<'ctx, 's: 'ctx, S> CommandHandler<&'ctx mut StateMachineApplyContext<'s, S>>
@@ -49,6 +53,7 @@ where
                 OnJournalEntryCommand::from_entry(self.invocation_id, is, CANCEL_SIGNAL.into())
                     .apply(ctx)
                     .await?;
+                ctx.reply_to_cancel(self.response_sink, CancelInvocationResponse::Appended);
             }
             InvocationStatus::Inboxed(inboxed) => {
                 ctx.terminate_inboxed_invocation(
@@ -56,7 +61,8 @@ where
                     self.invocation_id,
                     inboxed,
                 )
-                .await?
+                .await?;
+                ctx.reply_to_cancel(self.response_sink, CancelInvocationResponse::Done);
             }
             InvocationStatus::Scheduled(scheduled) => {
                 ctx.terminate_scheduled_invocation(
@@ -64,12 +70,17 @@ where
                     self.invocation_id,
                     scheduled,
                 )
-                .await?
+                .await?;
+                ctx.reply_to_cancel(self.response_sink, CancelInvocationResponse::Done);
             }
             InvocationStatus::Completed(_) => {
                 debug!(
                     "Received cancel command for completed invocation '{}'. To cleanup the invocation after it's been completed, use the purge invocation command.",
                     self.invocation_id
+                );
+                ctx.reply_to_cancel(
+                    self.response_sink,
+                    CancelInvocationResponse::AlreadyCompleted,
                 );
             }
             InvocationStatus::Free => {
@@ -84,6 +95,7 @@ where
                 // and the abort message can overtake the invoke/resume.
                 // Consequently the invoker might have not received the abort and the user tried to send it again.
                 ctx.send_abort_invocation_to_invoker(self.invocation_id, InvocationEpoch::MAX);
+                ctx.reply_to_cancel(self.response_sink, CancelInvocationResponse::NotFound);
             }
         };
 
@@ -97,10 +109,11 @@ mod tests {
 
     use crate::partition::state_machine::Action;
     use crate::partition::state_machine::tests::{TestEnv, fixtures, matchers};
-    use crate::partition::types::{InvokerEffect, InvokerEffectKind};
+    use crate::partition::types::InvokerEffectKind;
     use assert2::assert;
     use googletest::pat;
     use googletest::prelude::{assert_that, contains, eq, ge, not, some};
+    use restate_invoker_api::Effect;
     use restate_storage_api::invocation_status_table::{
         InvocationStatus, ReadOnlyInvocationStatusTable,
     };
@@ -125,9 +138,11 @@ mod tests {
 
         // Send signal notification
         let actions = test_env
-            .apply(Command::TerminateInvocation(InvocationTermination::cancel(
+            .apply(Command::TerminateInvocation(InvocationTermination {
                 invocation_id,
-            )))
+                flavor: TerminationFlavor::Cancel,
+                response_sink: None,
+            }))
             .await;
         assert_that!(
             actions,
@@ -186,14 +201,14 @@ mod tests {
 
         // Now pin to protocol v4, this should apply the cancel notification
         let actions = test_env
-            .apply(Command::InvokerEffect(InvokerEffect {
+            .apply(Command::InvokerEffect(Box::new(Effect {
                 invocation_id,
                 invocation_epoch: 0,
                 kind: InvokerEffectKind::PinnedDeployment(PinnedDeployment {
                     deployment_id: DeploymentId::default(),
                     service_protocol_version: ServiceProtocolVersion::V4,
                 }),
-            }))
+            })))
             .await;
         assert_that!(
             actions,
@@ -214,12 +229,12 @@ mod tests {
         let rpc_id = PartitionProcessorRpcRequestId::new();
 
         let _ = test_env
-            .apply(Command::Invoke(ServiceInvocation {
+            .apply(Command::Invoke(Box::new(ServiceInvocation {
                 invocation_id,
                 execution_time: Some(MillisSinceEpoch::MAX),
                 response_sink: Some(ServiceInvocationResponseSink::ingress(rpc_id)),
                 ..ServiceInvocation::mock()
-            }))
+            })))
             .await;
 
         // assert that scheduled invocation is in invocation_status
@@ -268,22 +283,22 @@ mod tests {
         let caller_id = InvocationId::mock_random();
 
         let _ = test_env
-            .apply(Command::Invoke(ServiceInvocation {
+            .apply(Command::Invoke(Box::new(ServiceInvocation {
                 invocation_id,
                 invocation_target: invocation_target.clone(),
                 ..ServiceInvocation::mock()
-            }))
+            })))
             .await;
 
         let _ = test_env
-            .apply(Command::Invoke(ServiceInvocation {
+            .apply(Command::Invoke(Box::new(ServiceInvocation {
                 invocation_id: inboxed_id,
                 invocation_target: inboxed_target,
                 response_sink: Some(ServiceInvocationResponseSink::PartitionProcessor(
                     JournalCompletionTarget::from_parts(caller_id, 0, 0),
                 )),
                 ..ServiceInvocation::mock()
-            }))
+            })))
             .await;
 
         let current_invocation_status = test_env

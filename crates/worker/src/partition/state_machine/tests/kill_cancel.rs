@@ -18,7 +18,7 @@ use restate_storage_api::journal_table::JournalTable;
 use restate_storage_api::timer_table::{Timer, TimerKey, TimerKeyKind, TimerTable};
 use restate_types::deployment::PinnedDeployment;
 use restate_types::identifiers::EntryIndex;
-use restate_types::invocation::TerminationFlavor;
+use restate_types::invocation::{IngressInvocationResponseSink, TerminationFlavor};
 use restate_types::journal::enriched::EnrichedEntryHeader;
 use restate_types::journal_v2::NotificationId;
 use restate_types::service_protocol;
@@ -38,22 +38,22 @@ async fn kill_inboxed_invocation() -> anyhow::Result<()> {
     let caller_id = InvocationId::mock_random();
 
     let _ = test_env
-        .apply(Command::Invoke(ServiceInvocation {
+        .apply(Command::Invoke(Box::new(ServiceInvocation {
             invocation_id,
             invocation_target: invocation_target.clone(),
             ..ServiceInvocation::mock()
-        }))
+        })))
         .await;
 
     let _ = test_env
-        .apply(Command::Invoke(ServiceInvocation {
+        .apply(Command::Invoke(Box::new(ServiceInvocation {
             invocation_id: inboxed_id,
             invocation_target: inboxed_target,
             response_sink: Some(ServiceInvocationResponseSink::PartitionProcessor(
                 JournalCompletionTarget::from_parts(caller_id, 0, 0),
             )),
             ..ServiceInvocation::mock()
-        }))
+        })))
         .await;
 
     let current_invocation_status = test_env
@@ -64,10 +64,15 @@ async fn kill_inboxed_invocation() -> anyhow::Result<()> {
     // assert that inboxed invocation is in invocation_status
     assert!(let InvocationStatus::Inboxed(_) = current_invocation_status);
 
+    let request_id = PartitionProcessorRpcRequestId::new();
     let actions = test_env
-        .apply(Command::TerminateInvocation(InvocationTermination::kill(
-            inboxed_id,
-        )))
+        .apply(Command::TerminateInvocation(InvocationTermination {
+            invocation_id: inboxed_id,
+            flavor: TerminationFlavor::Kill,
+            response_sink: Some(InvocationMutationResponseSink::Ingress(
+                IngressInvocationResponseSink { request_id },
+            )),
+        }))
         .await;
 
     let current_invocation_status = test_env
@@ -80,11 +85,17 @@ async fn kill_inboxed_invocation() -> anyhow::Result<()> {
 
     assert_that!(
         actions,
-        contains(
-            matchers::actions::invocation_response_to_partition_processor(
-                caller_id,
-                0,
-                eq(ResponseResult::Failure(KILLED_INVOCATION_ERROR))
+        all!(
+            contains(matchers::actions::forward_kill_invocation_response(
+                request_id,
+                KillInvocationResponse::Ok
+            )),
+            contains(
+                matchers::actions::invocation_response_to_partition_processor(
+                    caller_id,
+                    0,
+                    eq(ResponseResult::Failure(KILLED_INVOCATION_ERROR))
+                )
             )
         )
     );
@@ -120,12 +131,12 @@ async fn terminate_scheduled_invocation(
     let rpc_id = PartitionProcessorRpcRequestId::new();
 
     let _ = test_env
-        .apply(Command::Invoke(ServiceInvocation {
+        .apply(Command::Invoke(Box::new(ServiceInvocation {
             invocation_id,
             execution_time: Some(MillisSinceEpoch::MAX),
             response_sink: Some(ServiceInvocationResponseSink::ingress(rpc_id)),
             ..ServiceInvocation::mock()
-        }))
+        })))
         .await;
 
     // assert that inboxed invocation is in invocation_status
@@ -139,6 +150,7 @@ async fn terminate_scheduled_invocation(
         .apply(Command::TerminateInvocation(InvocationTermination {
             invocation_id,
             flavor: termination_flavor,
+            response_sink: None,
         }))
         .await;
     assert_that!(
@@ -179,20 +191,20 @@ async fn kill_call_tree() -> anyhow::Result<()> {
     let enqueued_invocation_id_on_same_target = InvocationId::mock_generate(&invocation_target);
 
     let _ = test_env
-        .apply(Command::Invoke(ServiceInvocation {
+        .apply(Command::Invoke(Box::new(ServiceInvocation {
             invocation_id,
             invocation_target: invocation_target.clone(),
             ..ServiceInvocation::mock()
-        }))
+        })))
         .await;
 
     // Let's enqueue an invocation afterward
     let _ = test_env
-        .apply(Command::Invoke(ServiceInvocation {
+        .apply(Command::Invoke(Box::new(ServiceInvocation {
             invocation_id: enqueued_invocation_id_on_same_target,
             invocation_target: invocation_target.clone(),
             ..ServiceInvocation::mock()
-        }))
+        })))
         .await;
 
     // Let's add some journal entries
@@ -223,9 +235,11 @@ async fn kill_call_tree() -> anyhow::Result<()> {
 
     // Now let's send the termination command
     let actions = test_env
-        .apply(Command::TerminateInvocation(InvocationTermination::kill(
+        .apply(Command::TerminateInvocation(InvocationTermination {
             invocation_id,
-        )))
+            flavor: TerminationFlavor::Kill,
+            response_sink: None,
+        }))
         .await;
 
     assert_that!(
@@ -297,19 +311,19 @@ async fn cancel_invoked_invocation() -> Result<(), Error> {
 
     let _ = test_env
         .apply_multiple([
-            Command::Invoke(ServiceInvocation {
+            Command::Invoke(Box::new(ServiceInvocation {
                 invocation_id,
                 invocation_target: invocation_target.clone(),
                 ..ServiceInvocation::mock()
-            }),
-            Command::InvokerEffect(InvokerEffect {
+            })),
+            Command::InvokerEffect(Box::new(Effect {
                 invocation_id,
                 invocation_epoch: 0,
                 kind: InvokerEffectKind::PinnedDeployment(PinnedDeployment {
                     deployment_id: Default::default(),
                     service_protocol_version: ServiceProtocolVersion::V3,
                 }),
-            }),
+            })),
         ])
         .await;
 
@@ -357,9 +371,11 @@ async fn cancel_invoked_invocation() -> Result<(), Error> {
     tx.commit().await?;
 
     let actions = test_env
-        .apply(Command::TerminateInvocation(InvocationTermination::cancel(
+        .apply(Command::TerminateInvocation(InvocationTermination {
             invocation_id,
-        )))
+            flavor: TerminationFlavor::Cancel,
+            response_sink: None,
+        }))
         .await;
 
     // Invocation shouldn't be gone
@@ -421,19 +437,19 @@ async fn cancel_suspended_invocation() -> Result<(), Error> {
 
     let _ = test_env
         .apply_multiple([
-            Command::Invoke(ServiceInvocation {
+            Command::Invoke(Box::new(ServiceInvocation {
                 invocation_id,
                 invocation_target: invocation_target.clone(),
                 ..ServiceInvocation::mock()
-            }),
-            Command::InvokerEffect(InvokerEffect {
+            })),
+            Command::InvokerEffect(Box::new(Effect {
                 invocation_id,
                 invocation_epoch: 0,
                 kind: InvokerEffectKind::PinnedDeployment(PinnedDeployment {
                     deployment_id: Default::default(),
                     service_protocol_version: ServiceProtocolVersion::V3,
                 }),
-            }),
+            })),
         ])
         .await;
 
@@ -494,10 +510,15 @@ async fn cancel_suspended_invocation() -> Result<(), Error> {
     .await?;
     tx.commit().await?;
 
+    let request_id = PartitionProcessorRpcRequestId::new();
     let actions = test_env
-        .apply(Command::TerminateInvocation(InvocationTermination::cancel(
+        .apply(Command::TerminateInvocation(InvocationTermination {
             invocation_id,
-        )))
+            flavor: TerminationFlavor::Cancel,
+            response_sink: Some(InvocationMutationResponseSink::Ingress(
+                IngressInvocationResponseSink { request_id },
+            )),
+        }))
         .await;
 
     // Invocation shouldn't be gone
@@ -528,6 +549,10 @@ async fn cancel_suspended_invocation() -> Result<(), Error> {
     assert_that!(
         actions,
         all!(
+            contains(matchers::actions::forward_cancel_invocation_response(
+                request_id,
+                CancelInvocationResponse::Appended
+            )),
             contains(matchers::actions::terminate_invocation(
                 call_invocation_id,
                 TerminationFlavor::Cancel
@@ -555,11 +580,11 @@ async fn cancel_invocation_entry_referring_to_previous_entry() {
     let callee_2 = InvocationId::mock_random();
 
     let _ = test_env
-        .apply(Command::Invoke(ServiceInvocation {
+        .apply(Command::Invoke(Box::new(ServiceInvocation {
             invocation_id,
             invocation_target: invocation_target.clone(),
             ..ServiceInvocation::mock()
-        }))
+        })))
         .await;
 
     // Add call and one way call journal entry
@@ -588,7 +613,7 @@ async fn cancel_invocation_entry_referring_to_previous_entry() {
     // Now create cancel invocation entry
     let actions = test_env
         .apply_multiple(vec![
-            Command::InvokerEffect(InvokerEffect {
+            Command::InvokerEffect(Box::new(Effect {
                 invocation_id,
                 invocation_epoch: 0,
                 kind: InvokerEffectKind::JournalEntry {
@@ -597,8 +622,8 @@ async fn cancel_invocation_entry_referring_to_previous_entry() {
                         CancelInvocationTarget::InvocationId(callee_1.to_string().into()),
                     )),
                 },
-            }),
-            Command::InvokerEffect(InvokerEffect {
+            })),
+            Command::InvokerEffect(Box::new(Effect {
                 invocation_id,
                 invocation_epoch: 0,
                 kind: InvokerEffectKind::JournalEntry {
@@ -607,7 +632,7 @@ async fn cancel_invocation_entry_referring_to_previous_entry() {
                         CancelInvocationTarget::CallEntryIndex(2),
                     )),
                 },
-            }),
+            })),
         ])
         .await;
 

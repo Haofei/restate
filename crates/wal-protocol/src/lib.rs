@@ -129,7 +129,7 @@ pub enum Destination {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Command {
     // -- Control-plane related events
-    AnnounceLeader(AnnounceLeader),
+    AnnounceLeader(Box<AnnounceLeader>),
 
     // -- Partition processor commands
     /// Manual patching of storage state
@@ -141,17 +141,17 @@ pub enum Command {
     /// Purge a completed invocation journal
     PurgeJournal(PurgeInvocationRequest),
     /// Start an invocation on this partition
-    Invoke(ServiceInvocation),
+    Invoke(Box<ServiceInvocation>),
     /// Truncate the message outbox up to, and including, the specified index.
     TruncateOutbox(MessageIndex),
     /// Proxy a service invocation through this partition processor, to reuse the deduplication id map.
-    ProxyThrough(ServiceInvocation),
+    ProxyThrough(Box<ServiceInvocation>),
     /// Attach to an existing invocation
     AttachInvocation(AttachInvocationRequest),
 
     // -- Partition processor events for PP
     /// Invoker is reporting effect(s) from an ongoing invocation.
-    InvokerEffect(restate_invoker_api::Effect),
+    InvokerEffect(Box<restate_invoker_api::Effect>),
     /// Timer has fired
     Timer(TimerKeyValue),
     /// Schedule timer
@@ -303,8 +303,8 @@ mod envelope {
         Unknown = 0,
         AnnounceLeader = 1,                     // flexbuffers
         PatchState = 2,                         // protobuf
-        TerminateInvocation = 3,                // bilrost
-        PurgeInvocation = 4,                    // bilrost
+        TerminateInvocation = 3,                // flexbuffers
+        PurgeInvocation = 4,                    // flexbuffers
         Invoke = 5,                             // protobuf
         TruncateOutbox = 6,                     // flexbuffers
         ProxyThrough = 7,                       // protobuf
@@ -315,7 +315,7 @@ mod envelope {
         InvocationResponse = 12,                // protobuf
         NotifyGetInvocationOutputResponse = 13, // bilrost
         NotifySignal = 14,                      // protobuf
-        PurgeJournal = 15,                      // bilrost
+        PurgeJournal = 15,                      // flexbuffers
     }
 
     #[derive(bilrost::Message)]
@@ -431,16 +431,18 @@ mod envelope {
             }
             Command::TerminateInvocation(value) => (
                 CommandKind::TerminateInvocation,
-                Field::encode_bilrost(value),
+                Field::encode_serde(StorageCodecKind::FlexbuffersSerde, value),
             ),
-            Command::PurgeInvocation(value) => {
-                (CommandKind::PurgeInvocation, Field::encode_bilrost(value))
-            }
-            Command::PurgeJournal(value) => {
-                (CommandKind::PurgeJournal, Field::encode_bilrost(value))
-            }
+            Command::PurgeInvocation(value) => (
+                CommandKind::PurgeInvocation,
+                Field::encode_serde(StorageCodecKind::FlexbuffersSerde, value),
+            ),
+            Command::PurgeJournal(value) => (
+                CommandKind::PurgeJournal,
+                Field::encode_serde(StorageCodecKind::FlexbuffersSerde, value),
+            ),
             Command::Invoke(value) => {
-                let value = protobuf::ServiceInvocation::from(value.clone());
+                let value = protobuf::ServiceInvocation::from(value.as_ref());
                 (CommandKind::Invoke, Field::encode_protobuf(&value))
             }
             Command::TruncateOutbox(value) => (
@@ -448,7 +450,7 @@ mod envelope {
                 Field::encode_serde(StorageCodecKind::FlexbuffersSerde, value),
             ),
             Command::ProxyThrough(value) => {
-                let value = protobuf::ServiceInvocation::from(value.clone());
+                let value = protobuf::ServiceInvocation::from(value.as_ref());
                 (CommandKind::ProxyThrough, Field::encode_protobuf(&value))
             }
             Command::AttachInvocation(value) => {
@@ -517,21 +519,21 @@ mod envelope {
                 Command::PatchState(value.try_into()?)
             }
             CommandKind::TerminateInvocation => {
-                codec_or_error!(envelope.command, StorageCodecKind::Bilrost);
-                Command::TerminateInvocation(envelope.command.decode_bilrost()?)
+                codec_or_error!(envelope.command, StorageCodecKind::FlexbuffersSerde);
+                Command::TerminateInvocation(envelope.command.decode_serde()?)
             }
             CommandKind::PurgeInvocation => {
-                codec_or_error!(envelope.command, StorageCodecKind::Bilrost);
-                Command::PurgeInvocation(envelope.command.decode_bilrost()?)
+                codec_or_error!(envelope.command, StorageCodecKind::FlexbuffersSerde);
+                Command::PurgeInvocation(envelope.command.decode_serde()?)
             }
             CommandKind::PurgeJournal => {
-                codec_or_error!(envelope.command, StorageCodecKind::Bilrost);
-                Command::PurgeJournal(envelope.command.decode_bilrost()?)
+                codec_or_error!(envelope.command, StorageCodecKind::FlexbuffersSerde);
+                Command::PurgeJournal(envelope.command.decode_serde()?)
             }
             CommandKind::Invoke => {
                 codec_or_error!(envelope.command, StorageCodecKind::Protobuf);
                 let value: protobuf::ServiceInvocation = envelope.command.decode_protobuf()?;
-                Command::Invoke(value.try_into()?)
+                Command::Invoke(Box::new(value.try_into()?))
             }
             CommandKind::TruncateOutbox => {
                 codec_or_error!(envelope.command, StorageCodecKind::FlexbuffersSerde);
@@ -540,7 +542,7 @@ mod envelope {
             CommandKind::ProxyThrough => {
                 codec_or_error!(envelope.command, StorageCodecKind::Protobuf);
                 let value: protobuf::ServiceInvocation = envelope.command.decode_protobuf()?;
-                Command::ProxyThrough(value.try_into()?)
+                Command::ProxyThrough(Box::new(value.try_into()?))
             }
             CommandKind::AttachInvocation => {
                 codec_or_error!(envelope.command, StorageCodecKind::Protobuf);

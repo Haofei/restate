@@ -27,7 +27,7 @@ use restate_bifrost::BifrostService;
 use restate_core::network::{
     GrpcConnector, MessageRouterBuilder, NetworkServerBuilder, Networking,
 };
-use restate_core::partitions::{PartitionRoutingRefresher, spawn_partition_routing_refresher};
+use restate_core::partitions::PartitionRouting;
 use restate_core::{Metadata, MetadataKind, MetadataWriter, TaskKind};
 use restate_core::{MetadataBuilder, MetadataManager, TaskCenter, spawn_metadata_manager};
 use restate_futures_util::overdue::OverdueLoggingExt;
@@ -123,7 +123,6 @@ pub struct Node {
     server_builder: NetworkServerBuilder,
     updateable_config: Live<Configuration>,
     metadata_manager: MetadataManager,
-    partition_routing_refresher: PartitionRoutingRefresher,
     bifrost: BifrostService,
     metadata_server_role: Option<BoxedMetadataServer>,
     failure_detector: FailureDetector<Networking<GrpcConnector>>,
@@ -150,6 +149,7 @@ impl Node {
         // We need to se the global metadata as soon as possible since the metadata store client's
         // auto update functionality won't be started if the global metadata is not set.
         let is_set = TaskCenter::try_set_global_metadata(metadata.clone());
+        let tc = TaskCenter::current();
         debug_assert!(is_set, "Global metadata was already set");
 
         let is_provisioned =
@@ -167,12 +167,11 @@ impl Node {
         ) && config.has_role(Role::MetadataServer)
         {
             return Err(BuildError::InvalidConfiguration(anyhow::anyhow!(
-                "Detected possible misconfiguration. This node runs a \"{}\" metadata \
+                "Detected possible misconfiguration. This node runs a metadata \
                 server but is configured to use the \"{}\" metadata client. If you \
                 don't want to run a metadata server, remove the metadata-server role. If you \
-                want to use the Restate metadata store, then set \
+                would like to use the Restate metadata store, then set \
                 metadata-client.type = \"replicated\" or leave it unset",
-                config.metadata_server.kind(),
                 config.common.metadata_client.kind,
             )));
         };
@@ -181,7 +180,7 @@ impl Node {
         {
             restate_metadata_server::create_metadata_server_and_client(
                 updateable_config.clone(),
-                TaskCenter::with_current(|tc| tc.health().metadata_server_status()),
+                tc.health().metadata_server_status(),
                 &mut server_builder,
             )
             .await
@@ -199,7 +198,6 @@ impl Node {
         let mut router_builder = MessageRouterBuilder::default();
         let networking = Networking::with_grpc_connector();
         metadata_manager.register_in_message_router(&mut router_builder);
-        let partition_routing_refresher = PartitionRoutingRefresher::default();
         let replica_set_states = PartitionReplicaSetStates::default();
 
         let record_cache = RecordCache::new(
@@ -236,7 +234,7 @@ impl Node {
         let log_server = if config.has_role(Role::LogServer) {
             Some(
                 LogServerService::create(
-                    TaskCenter::with_current(|tc| tc.health().log_server_status()),
+                    tc.health().log_server_status(),
                     updateable_config.clone(),
                     metadata.clone(),
                     record_cache,
@@ -252,9 +250,9 @@ impl Node {
         let worker_role = if config.has_role(Role::Worker) {
             Some(
                 WorkerRole::create(
-                    TaskCenter::with_current(|tc| tc.health().worker_status()),
+                    tc.health().worker_status(),
                     metadata.clone(),
-                    partition_routing_refresher.partition_routing(),
+                    PartitionRouting::new(replica_set_states.clone(), tc.clone()),
                     replica_set_states.clone(),
                     updateable_config.clone(),
                     &mut router_builder,
@@ -293,11 +291,11 @@ impl Node {
                     .clone()
                     .map(|config| &config.ingress)
                     .boxed(),
-                TaskCenter::with_current(|tc| tc.health().ingress_status()),
+                tc.health().ingress_status(),
                 networking.clone(),
                 metadata.updateable_schema(),
                 metadata.updateable_partition_table(),
-                partition_routing_refresher.partition_routing(),
+                PartitionRouting::new(replica_set_states.clone(), tc.clone()),
             ))
         } else {
             None
@@ -306,10 +304,11 @@ impl Node {
         let admin_role = if config.has_role(Role::Admin) {
             Some(
                 AdminRole::create(
-                    TaskCenter::with_current(|tc| tc.health().admin_status()),
+                    tc.health().admin_status(),
                     bifrost.clone(),
                     updateable_config.clone(),
-                    partition_routing_refresher.partition_routing(),
+                    PartitionRouting::new(replica_set_states.clone(), tc),
+                    metadata.updateable_partition_table(),
                     replica_set_states.clone(),
                     networking.clone(),
                     metadata,
@@ -345,7 +344,6 @@ impl Node {
         Ok(Node {
             updateable_config,
             metadata_manager,
-            partition_routing_refresher,
             bifrost: bifrost_svc,
             metadata_server_role: metadata_store_role,
             failure_detector,
@@ -509,9 +507,6 @@ impl Node {
         if let Some(log_server) = self.log_server {
             log_server.start(metadata_writer).await?;
         }
-
-        // Start partition routing information refresher
-        spawn_partition_routing_refresher(self.partition_routing_refresher)?;
 
         if let Some(ingress_role) = self.ingress_role {
             TaskCenter::spawn(TaskKind::IngressServer, "ingress-http", ingress_role.run())?;

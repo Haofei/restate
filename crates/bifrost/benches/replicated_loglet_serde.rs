@@ -29,7 +29,7 @@ use restate_storage_api::deduplication_table::{DedupInformation, EpochSequenceNu
 use restate_types::GenerationalNodeId;
 use restate_types::identifiers::{InvocationId, LeaderEpoch, PartitionProcessorRpcRequestId};
 use restate_types::invocation::{
-    InvocationTarget, ServiceInvocation, ServiceInvocationSpanContext,
+    InvocationTarget, RestateVersion, ServiceInvocation, ServiceInvocationSpanContext,
 };
 use restate_types::journal_v2::CommandType;
 use restate_types::journal_v2::raw::{RawCommand, RawEntry, RawEntryHeader, RawEntryInner};
@@ -69,7 +69,7 @@ fn invoke_cmd() -> Command {
     let inv_source = restate_types::invocation::Source::Ingress(request_id);
     let handler: ByteString = format!("aFunction_{}", rand_string(10)).into();
 
-    Command::Invoke(ServiceInvocation {
+    Command::Invoke(Box::new(ServiceInvocation {
         invocation_id: InvocationId::generate(
             &InvocationTarget::service("MyWonderfulService", handler.clone()),
             Some(&idempotency_key),
@@ -95,7 +95,8 @@ fn invoke_cmd() -> Command {
         submit_notification_sink: Some(
             restate_types::invocation::SubmitNotificationSink::Ingress { request_id },
         ),
-    })
+        restate_version: RestateVersion::current(),
+    }))
 }
 
 fn invoker_effect_cmd() -> Command {
@@ -105,7 +106,7 @@ fn invoker_effect_cmd() -> Command {
     let mut data = [0u8; 128];
     rand::rng().fill_bytes(&mut data);
 
-    Command::InvokerEffect(Effect {
+    Command::InvokerEffect(Box::new(Effect {
         invocation_id: InvocationId::generate(
             &InvocationTarget::service("MyWonderfulService", handler.clone()),
             Some(&idempotency_key),
@@ -121,7 +122,7 @@ fn invoker_effect_cmd() -> Command {
             ),
             command_index_to_ack: Some(random()),
         },
-    })
+    }))
 }
 
 pub fn generate_envelope<G>(generator: G) -> Arc<Envelope>
@@ -204,7 +205,7 @@ fn serialize_append_message(payloads: Arc<[Record]>) -> anyhow::Result<Message> 
             segment_index: 2.into(),
             loglet_id: LogletId::new(12u16.into(), 4.into()),
         },
-        payloads,
+        payloads: payloads.into(),
     };
 
     let body = Body::Datagram(Datagram {

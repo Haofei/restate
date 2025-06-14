@@ -1049,7 +1049,7 @@ checksum = "8c3c1a368f70d6cf7302d78f8f7093da241fb8e8807c05cc9e51a125895a6d5b"
 
 [[package]]
 name = "bifrost-benchpress"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1103,9 +1103,9 @@ dependencies = [
 
 [[package]]
 name = "bilrost"
-version = "0.1013.0-rc.4"
+version = "0.1013.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e8e7a9f7362e2e380c13b6df94f81576c32c7b5d25e608f6279232e8f0aee76"
+checksum = "640b021fedf44f44640771b2c3e5ec53ff0122d89b3fd1448e6880da0ace787b"
 dependencies = [
  "bilrost-derive",
  "bytes",
@@ -1115,9 +1115,9 @@ dependencies = [
 
 [[package]]
 name = "bilrost-derive"
-version = "0.1013.0-rc.4"
+version = "0.1013.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20f1ceb0a2d313f690ef55bfd857d257bf9df859b2db08d2c1e690a10eaf449a"
+checksum = "e9910598cd6a5c5ee053af712bbb3385e96b4eb4adc043b24a69b6c37004ba22"
 dependencies = [
  "eyre",
  "itertools 0.14.0",
@@ -1653,7 +1653,7 @@ dependencies = [
 
 [[package]]
 name = "codederror"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "codederror-derive",
  "thiserror 2.0.12",
@@ -3476,9 +3476,9 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "humantime"
-version = "2.1.0"
+version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a3a5bfb195931eeb336b2a7b4d761daec841b97f947d34394601737a7bba5e4"
+checksum = "9b112acc8b3adf4b107a8ec20977da0273a8c386765a3ec0229bd500a1443f9f"
 
 [[package]]
 name = "hyper"
@@ -3967,6 +3967,47 @@ dependencies = [
  "tikv-jemalloc-ctl",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "jiff"
+version = "0.2.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a194df1107f33c79f4f93d02c80798520551949d59dfad22b6157048a88cca93"
+dependencies = [
+ "jiff-static",
+ "jiff-tzdb-platform",
+ "log",
+ "portable-atomic",
+ "portable-atomic-util",
+ "serde",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "jiff-static"
+version = "0.2.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c6e1db7ed32c6c71b759497fae34bf7933636f75a251b9e736555da426f6442"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.101",
+]
+
+[[package]]
+name = "jiff-tzdb"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1283705eb0a21404d2bfd6eef2a7593d240bc42a0bdb39db0ad6fa2ec026524"
+
+[[package]]
+name = "jiff-tzdb-platform"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "875a5a69ac2bab1a891711cf5eccbec1ce0341ea805560dcd90b7a2e925132e8"
+dependencies = [
+ "jiff-tzdb",
 ]
 
 [[package]]
@@ -4636,7 +4677,7 @@ dependencies = [
 
 [[package]]
 name = "mock-service-endpoint"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "assert2",
  "async-stream",
@@ -4995,9 +5036,9 @@ dependencies = [
 
 [[package]]
 name = "object_store"
-version = "0.12.0"
+version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9ce831b09395f933addbc56d894d889e4b226eba304d4e7adbab591e26daf1e"
+checksum = "7781f96d79ed0f961a7021424ab01840efbda64ae7a505aaea195efc91eaaec4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -5014,7 +5055,7 @@ dependencies = [
  "parking_lot",
  "percent-encoding",
  "quick-xml 0.37.2",
- "rand 0.8.5",
+ "rand 0.9.0",
  "reqwest",
  "ring",
  "serde",
@@ -5025,6 +5066,8 @@ dependencies = [
  "tracing",
  "url",
  "walkdir",
+ "wasm-bindgen-futures",
+ "web-time",
 ]
 
 [[package]]
@@ -5546,6 +5589,15 @@ name = "portable-atomic"
 version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "280dc24453071f1b63954171985a0b0d30058d287960968b9b2aca264c8d4ee6"
+
+[[package]]
+name = "portable-atomic-util"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8a2f0d8d040d7848a709caf78912debcc3f33ee4b3cac47d73d1e1069e83507"
+dependencies = [
+ "portable-atomic",
+]
 
 [[package]]
 name = "postgres-protocol"
@@ -6444,10 +6496,11 @@ dependencies = [
 
 [[package]]
 name = "restate-admin"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "ahash 0.8.11",
  "anyhow",
+ "assert2",
  "axum",
  "bytes",
  "bytestring",
@@ -6497,7 +6550,7 @@ dependencies = [
 
 [[package]]
 name = "restate-admin-rest-model"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "bytes",
  "derive_more",
@@ -6516,7 +6569,7 @@ dependencies = [
 
 [[package]]
 name = "restate-base64-util"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "base64 0.22.1",
  "workspace-hack",
@@ -6524,7 +6577,7 @@ dependencies = [
 
 [[package]]
 name = "restate-benchmarks"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "anyhow",
  "criterion",
@@ -6551,7 +6604,7 @@ dependencies = [
 
 [[package]]
 name = "restate-bifrost"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "ahash 0.8.11",
  "anyhow",
@@ -6608,7 +6661,7 @@ dependencies = [
 
 [[package]]
 name = "restate-cli"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -6635,13 +6688,13 @@ dependencies = [
  "futures",
  "http 1.2.0",
  "http-body-util",
- "humantime",
  "hyper",
  "hyper-rustls",
  "hyper-util",
  "indicatif",
  "indoc",
  "itertools 0.14.0",
+ "json-patch",
  "jsonwebtoken",
  "octocrab",
  "open",
@@ -6675,7 +6728,7 @@ dependencies = [
 
 [[package]]
 name = "restate-cli-util"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -6699,7 +6752,7 @@ dependencies = [
 
 [[package]]
 name = "restate-core"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "ahash 0.8.11",
  "anyhow",
@@ -6727,7 +6780,7 @@ dependencies = [
  "hyper-util",
  "itertools 0.14.0",
  "metrics",
- "object_store 0.12.0",
+ "object_store 0.12.2",
  "opentelemetry",
  "opentelemetry_sdk",
  "parking_lot",
@@ -6779,7 +6832,7 @@ dependencies = [
 
 [[package]]
 name = "restate-encoding"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "bilrost",
  "bytes",
@@ -6802,7 +6855,7 @@ dependencies = [
 
 [[package]]
 name = "restate-errors"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "codederror",
  "paste",
@@ -6815,7 +6868,7 @@ dependencies = [
 
 [[package]]
 name = "restate-fs-util"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "tokio",
  "tracing",
@@ -6825,7 +6878,7 @@ dependencies = [
 
 [[package]]
 name = "restate-futures-util"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "anyhow",
  "futures",
@@ -6843,7 +6896,7 @@ dependencies = [
 
 [[package]]
 name = "restate-ingress-http"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "anyhow",
  "bytes",
@@ -6888,7 +6941,7 @@ dependencies = [
 
 [[package]]
 name = "restate-ingress-kafka"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6916,7 +6969,7 @@ dependencies = [
 
 [[package]]
 name = "restate-invoker-api"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "anyhow",
  "bytes",
@@ -6934,7 +6987,7 @@ dependencies = [
 
 [[package]]
 name = "restate-invoker-impl"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "anyhow",
  "bytes",
@@ -6975,7 +7028,7 @@ dependencies = [
 
 [[package]]
 name = "restate-local-cluster-runner"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -7012,7 +7065,7 @@ dependencies = [
 
 [[package]]
 name = "restate-log-server"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "ahash 0.8.11",
  "anyhow",
@@ -7061,7 +7114,7 @@ dependencies = [
 
 [[package]]
 name = "restate-log-server-grpc"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "prost",
  "restate-types",
@@ -7072,7 +7125,7 @@ dependencies = [
 
 [[package]]
 name = "restate-metadata-providers"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7082,7 +7135,7 @@ dependencies = [
  "derive_more",
  "etcd-client",
  "indexmap 2.7.1",
- "object_store 0.12.0",
+ "object_store 0.12.2",
  "parking_lot",
  "rand 0.9.0",
  "restate-core",
@@ -7103,7 +7156,7 @@ dependencies = [
 
 [[package]]
 name = "restate-metadata-server"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -7155,7 +7208,7 @@ dependencies = [
 
 [[package]]
 name = "restate-metadata-server-grpc"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "bytes",
  "bytestring",
@@ -7177,7 +7230,7 @@ dependencies = [
 
 [[package]]
 name = "restate-metadata-store"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "async-trait",
  "bytes",
@@ -7197,7 +7250,7 @@ dependencies = [
 
 [[package]]
 name = "restate-node"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "ahash 0.8.11",
  "anyhow",
@@ -7253,7 +7306,7 @@ dependencies = [
 
 [[package]]
 name = "restate-object-store-util"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "anyhow",
  "aws-config",
@@ -7262,7 +7315,7 @@ dependencies = [
  "aws-smithy-runtime-api",
  "aws-smithy-types",
  "futures",
- "object_store 0.12.0",
+ "object_store 0.12.2",
  "restate-types",
  "tracing",
  "url",
@@ -7271,7 +7324,7 @@ dependencies = [
 
 [[package]]
 name = "restate-partition-store"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "ahash 0.8.11",
  "anyhow",
@@ -7318,7 +7371,7 @@ dependencies = [
 
 [[package]]
 name = "restate-queue"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "bincode",
  "criterion",
@@ -7332,7 +7385,7 @@ dependencies = [
 
 [[package]]
 name = "restate-rocksdb"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "anyhow",
  "bytes",
@@ -7363,7 +7416,7 @@ dependencies = [
 
 [[package]]
 name = "restate-serde-util"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "bytes",
  "bytesize",
@@ -7371,6 +7424,7 @@ dependencies = [
  "http-serde",
  "humantime",
  "iso8601",
+ "jiff",
  "prost",
  "schemars",
  "serde",
@@ -7381,7 +7435,7 @@ dependencies = [
 
 [[package]]
 name = "restate-server"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -7446,7 +7500,7 @@ dependencies = [
 
 [[package]]
 name = "restate-service-client"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "arc-swap",
  "aws-config",
@@ -7485,7 +7539,7 @@ dependencies = [
 
 [[package]]
 name = "restate-service-protocol"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "bytes",
  "bytes-utils",
@@ -7514,7 +7568,7 @@ dependencies = [
 
 [[package]]
 name = "restate-service-protocol-v4"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "assert2",
  "bytes",
@@ -7541,7 +7595,7 @@ dependencies = [
 
 [[package]]
 name = "restate-storage-api"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "anyhow",
  "bytes",
@@ -7559,7 +7613,7 @@ dependencies = [
 
 [[package]]
 name = "restate-storage-query-datafusion"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "ahash 0.8.11",
  "anyhow",
@@ -7598,7 +7652,7 @@ dependencies = [
 
 [[package]]
 name = "restate-storage-query-postgres"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7629,7 +7683,7 @@ dependencies = [
 
 [[package]]
 name = "restate-test-util"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "assert2",
  "googletest",
@@ -7641,7 +7695,7 @@ dependencies = [
 
 [[package]]
 name = "restate-timer"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "ahash 0.8.11",
  "derive_builder",
@@ -7664,7 +7718,7 @@ dependencies = [
 
 [[package]]
 name = "restate-timer-queue"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "futures",
  "tokio",
@@ -7673,7 +7727,7 @@ dependencies = [
 
 [[package]]
 name = "restate-tracing-instrumentation"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "arc-swap",
  "console-subscriber",
@@ -7704,7 +7758,7 @@ dependencies = [
 
 [[package]]
 name = "restate-types"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "ahash 0.8.11",
  "anyhow",
@@ -7730,6 +7784,7 @@ dependencies = [
  "enumset",
  "figment",
  "flexbuffers",
+ "futures",
  "googletest",
  "hostname",
  "http 1.2.0",
@@ -7762,6 +7817,7 @@ dependencies = [
  "restate-types",
  "restate-utoipa",
  "schemars",
+ "semver",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -7792,7 +7848,7 @@ dependencies = [
 
 [[package]]
 name = "restate-utoipa"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "assert-json-diff",
  "indexmap 2.7.1",
@@ -7804,7 +7860,7 @@ dependencies = [
 
 [[package]]
 name = "restate-wal-protocol"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "anyhow",
  "bilrost",
@@ -7825,8 +7881,8 @@ dependencies = [
 
 [[package]]
 name = "restate-web-ui"
-version = "0.0.76"
-source = "git+https://github.com/restatedev/restate-web-ui-crate?tag=v0.0.76#159b33650e5c9fef9bfff3afc68f147365dd4162"
+version = "0.0.77"
+source = "git+https://github.com/restatedev/restate-web-ui-crate?tag=v0.0.77#e547355578ceaeca599b985470f8b9d742ce1952"
 dependencies = [
  "anyhow",
  "include_dir",
@@ -7835,7 +7891,7 @@ dependencies = [
 
 [[package]]
 name = "restate-worker"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "ahash 0.8.11",
  "anyhow",
@@ -7851,7 +7907,7 @@ dependencies = [
  "humantime",
  "itertools 0.14.0",
  "metrics",
- "object_store 0.12.0",
+ "object_store 0.12.2",
  "opentelemetry",
  "parking_lot",
  "pin-project",
@@ -7902,7 +7958,7 @@ dependencies = [
 
 [[package]]
 name = "restatectl"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "anyhow",
  "arrow",
@@ -8429,7 +8485,7 @@ dependencies = [
 
 [[package]]
 name = "service-protocol-wireshark-dissector"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "bytes",
  "mlua",
@@ -10513,7 +10569,7 @@ checksum = "66fee0b777b0f5ac1c69bb06d361268faafa61cd4682ae064a171c16c433e9e4"
 
 [[package]]
 name = "xtask"
-version = "1.3.3-dev"
+version = "1.4.0-dev"
 dependencies = [
  "anyhow",
  "reqwest",

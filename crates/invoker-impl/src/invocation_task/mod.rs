@@ -285,6 +285,13 @@ where
             ),
         };
 
+        if self.invocation_epoch != journal_metadata.invocation_epoch {
+            shortcircuit!(Err(InvokerError::StaleJournalRead {
+                actual: journal_metadata.invocation_epoch,
+                expected: self.invocation_epoch
+            }));
+        }
+
         // Resolve the deployment metadata
         let schemas = self.schemas.live_load();
         let (deployment, chosen_service_protocol_version, deployment_changed) =
@@ -466,7 +473,9 @@ impl ResponseStreamState {
             ResponseStreamState::WaitingHeaders(join_handle) => {
                 let http_response = match ready!(join_handle.poll_unpin(cx)) {
                     Ok(Ok(res)) => res,
-                    Ok(Err(hyper_err)) => return Poll::Ready(Err(InvokerError::Client(hyper_err))),
+                    Ok(Err(hyper_err)) => {
+                        return Poll::Ready(Err(InvokerError::Client(Box::new(hyper_err))));
+                    }
                     Err(join_err) => {
                         return Poll::Ready(Err(InvokerError::UnexpectedJoinError(join_err)));
                     }
@@ -498,7 +507,7 @@ impl ResponseStreamState {
                     let http_response = match ready!(join_handle.poll_unpin(cx)) {
                         Ok(Ok(res)) => res,
                         Ok(Err(hyper_err)) => {
-                            return Poll::Ready(Err(InvokerError::Client(hyper_err)));
+                            return Poll::Ready(Err(InvokerError::Client(Box::new(hyper_err))));
                         }
                         Err(join_err) => {
                             return Poll::Ready(Err(InvokerError::UnexpectedJoinError(join_err)));

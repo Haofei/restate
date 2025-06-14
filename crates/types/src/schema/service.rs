@@ -8,6 +8,17 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use arc_swap::ArcSwapOption;
+use serde::Deserialize;
+use serde::Serialize;
+use serde_with::serde_as;
+
+use restate_serde_util::DurationString;
+
 use super::Schema;
 use super::invocation_target::InvocationTargetMetadata;
 use crate::config::Configuration;
@@ -16,13 +27,6 @@ use crate::invocation::{
     InvocationTargetType, ServiceType, VirtualObjectHandlerType, WorkflowHandlerType,
 };
 use crate::schema::openapi::ServiceOpenAPI;
-use arc_swap::ArcSwapOption;
-use serde::Deserialize;
-use serde::Serialize;
-use serde_with::serde_as;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
 
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,7 +75,7 @@ pub struct ServiceMetadata {
     ///
     /// The retention duration of idempotent requests for this service.
     #[serde(
-        with = "serde_with::As::<Option<restate_serde_util::DurationString>>",
+        with = "serde_with::As::<Option<DurationString>>",
         skip_serializing_if = "Option::is_none",
         default
     )]
@@ -82,7 +86,7 @@ pub struct ServiceMetadata {
     ///
     /// The retention duration of workflows. Only available on workflow services.
     #[serde(
-        with = "serde_with::As::<Option<restate_serde_util::DurationString>>",
+        with = "serde_with::As::<Option<DurationString>>",
         skip_serializing_if = "Option::is_none",
         default
     )]
@@ -96,7 +100,7 @@ pub struct ServiceMetadata {
     /// In case the request has an idempotency key, the `idempotency_retention` caps the maximum `journal_retention` time.
     /// In case the request targets a workflow handler, the `workflow_completion_retention` caps the maximum `journal_retention` time.
     #[serde(
-        with = "serde_with::As::<Option<restate_serde_util::DurationString>>",
+        with = "serde_with::As::<Option<DurationString>>",
         skip_serializing_if = "Option::is_none",
         default
     )]
@@ -112,11 +116,11 @@ pub struct ServiceMetadata {
     /// The 'abort timeout' is used to abort the invocation, in case it doesn't react to
     /// the request to suspend.
     ///
-    /// Can be configured using the [`humantime`](https://docs.rs/humantime/latest/humantime/fn.parse_duration.html) format.
+    /// Can be configured using the [`jiff::fmt::friendly`](https://docs.rs/jiff/latest/jiff/fmt/friendly/index.html) format or ISO8601.
     ///
     /// This overrides the default inactivity timeout set in invoker options.
     #[serde(
-        with = "serde_with::As::<Option<restate_serde_util::DurationString>>",
+        with = "serde_with::As::<Option<DurationString>>",
         skip_serializing_if = "Option::is_none",
         default
     )]
@@ -133,11 +137,11 @@ pub struct ServiceMetadata {
     /// This timer potentially **interrupts** user code. If the user code needs longer to
     /// gracefully terminate, then this value needs to be set accordingly.
     ///
-    /// Can be configured using the [`humantime`](https://docs.rs/humantime/latest/humantime/fn.parse_duration.html) format.
+    /// Can be configured using the [`jiff::fmt::friendly`](https://docs.rs/jiff/latest/jiff/fmt/friendly/index.html) format or ISO8601.
     ///
     /// This overrides the default abort timeout set in invoker options.
     #[serde(
-        with = "serde_with::As::<Option<restate_serde_util::DurationString>>",
+        with = "serde_with::As::<Option<DurationString>>",
         skip_serializing_if = "Option::is_none",
         default
     )]
@@ -289,6 +293,13 @@ pub struct HandlerMetadata {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub enable_lazy_state: Option<bool>,
 
+    /// # Public
+    ///
+    /// If true, this handler can be invoked through the ingress.
+    /// If false, this handler can be invoked only from another Restate service.
+    #[serde(default = "restate_serde_util::default::bool::<true>")]
+    pub public: bool,
+
     /// # Human readable input description
     ///
     /// If empty, no schema was provided by the user at discovery time.
@@ -382,6 +393,7 @@ impl HandlerSchemas {
             inactivity_timeout: self.inactivity_timeout,
             abort_timeout: self.abort_timeout,
             enable_lazy_state: self.enable_lazy_state,
+            public: self.target_meta.public,
             input_description: self.target_meta.input_rules.to_string(),
             output_description: self.target_meta.output_rules.to_string(),
             input_json_schema: self.target_meta.input_rules.json_schema(),
@@ -610,6 +622,7 @@ pub mod test_util {
                                 inactivity_timeout: None,
                                 abort_timeout: None,
                                 enable_lazy_state: None,
+                                public: true,
                                 input_description: "any".to_string(),
                                 output_description: "any".to_string(),
                                 input_json_schema: None,
@@ -655,6 +668,7 @@ pub mod test_util {
                                 inactivity_timeout: None,
                                 abort_timeout: None,
                                 enable_lazy_state: None,
+                                public: true,
                                 input_description: "any".to_string(),
                                 output_description: "any".to_string(),
                                 input_json_schema: None,

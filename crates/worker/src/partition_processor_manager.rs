@@ -73,7 +73,7 @@ use restate_types::health::HealthStatus;
 use restate_types::identifiers::SnapshotId;
 use restate_types::identifiers::{LeaderEpoch, PartitionId, PartitionKey};
 use restate_types::live::Live;
-use restate_types::logs::{LogId, Lsn, SequenceNumber};
+use restate_types::logs::{Lsn, SequenceNumber};
 use restate_types::metadata_store::keys::partition_processor_epoch_key;
 use restate_types::net::metadata::MetadataKind;
 use restate_types::net::partition_processor::PartitionLeaderService;
@@ -84,6 +84,7 @@ use restate_types::net::partition_processor_manager::{
 use restate_types::net::{RpcRequest as _, UnaryMessage};
 use restate_types::nodes_config::{NodesConfigError, NodesConfiguration, WorkerState};
 use restate_types::partition_table::PartitionTable;
+use restate_types::partitions::Partition;
 use restate_types::partitions::state::PartitionReplicaSetStates;
 use restate_types::protobuf::common::WorkerStatus;
 use restate_types::retries::with_jitter;
@@ -627,8 +628,15 @@ impl PartitionProcessorManager {
 
             self.asynchronous_operations.spawn(
                 async move {
+                    let log_id = Metadata::with_current(|m| {
+                        m.partition_table_ref()
+                            .get(&partition_id)
+                            .map(Partition::log_id)
+                    })
+                    .expect("partition is in partition table");
+
                     let tail = bifrost
-                        .find_tail(LogId::from(partition_id), FindTailOptions::Fast)
+                        .find_tail(log_id, FindTailOptions::Fast)
                         .await
                         .map(|tail| tail.offset())
                         .ok();
@@ -713,6 +721,17 @@ impl PartitionProcessorManager {
                 // PP and the PPManager :-(. Maybe at some point we want to split the struct for it.
                 status.last_persisted_log_lsn = self.partition_store_manager.get_durable_lsn(*partition_id);
                 status.last_archived_log_lsn = self.archived_lsns.get(partition_id).cloned();
+
+                // todo: this will need to be moved to a place where PPM updates it regularly, or
+                // to be directly integrated into durable lsn tracking so we update it immediately
+                // after flush.
+                if let Some(durable_lsn) = status.last_persisted_log_lsn {
+                    self.replica_set_states.note_durable_lsn(
+                        *partition_id,
+                        my_node_id().as_plain(),
+                        durable_lsn,
+                    );
+                }
 
                 let current_tail_lsn = self.target_tail_lsns.get(partition_id).cloned();
 

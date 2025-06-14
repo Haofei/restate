@@ -16,6 +16,7 @@ use tokio::sync::{Notify, watch};
 
 use restate_encoding::NetSerde;
 
+use crate::cluster_state::ClusterState;
 use crate::identifiers::{LeaderEpoch, PartitionId};
 use crate::logs::{Lsn, SequenceNumber};
 use crate::partitions::PartitionConfiguration;
@@ -93,6 +94,44 @@ impl PartitionReplicaSetStates {
                 true
             }
         };
+
+        if modified {
+            self.inner.global_notify.notify_waiters();
+        }
+    }
+
+    pub fn note_durable_lsn(
+        &self,
+        partition_id: PartitionId,
+        node_id: PlainNodeId,
+        durable_lsn: Lsn,
+    ) {
+        let Some(mut state) = self.inner.partitions.get_mut(&partition_id) else {
+            return;
+        };
+        let mut modified = false;
+
+        // update durable lsn in members of current and/or next
+        for member in state
+            .value_mut()
+            .observed_current_membership
+            .members
+            .iter_mut()
+        {
+            if member.node_id == node_id && durable_lsn > member.durable_lsn {
+                member.durable_lsn = durable_lsn;
+                modified |= true;
+            }
+        }
+
+        if let Some(next_membership) = state.value_mut().observed_next_membership.as_mut() {
+            for member in next_membership.members.iter_mut() {
+                if member.node_id == node_id && durable_lsn > member.durable_lsn {
+                    member.durable_lsn = durable_lsn;
+                    modified |= true;
+                }
+            }
+        }
 
         if modified {
             self.inner.global_notify.notify_waiters();
@@ -207,6 +246,7 @@ impl MembershipState {
         {
             // we have a new current membership
             std::cmp::Ordering::Greater => {
+                // todo: try to use previous durable lsns if the two replica-sets intersect
                 self.observed_current_membership = incoming_current_membership.clone();
                 modified = true;
                 if self
@@ -286,6 +326,23 @@ impl MembershipState {
     pub fn watch_current_leader(&self) -> watch::Receiver<LeadershipState> {
         self.current_leader.subscribe()
     }
+
+    /// Returns the first alive node from `observed_current_membership` by overlaying it with the
+    /// current cluster state.
+    pub fn first_alive_node(&self, cluster_state: &ClusterState) -> Option<GenerationalNodeId> {
+        self.observed_current_membership
+            .members
+            .iter()
+            .find_map(|member| {
+                let (node_id, state) =
+                    cluster_state.get_node_state_and_generation(member.node_id)?;
+                if state.is_alive() {
+                    Some(node_id)
+                } else {
+                    None
+                }
+            })
+    }
 }
 
 #[derive(Debug, Clone, bilrost::Message, NetSerde)]
@@ -325,11 +382,13 @@ impl Default for ReplicaSetState {
 
 impl Merge for ReplicaSetState {
     fn merge(&mut self, other: Self) -> bool {
-        debug_assert_eq!(
-            self.members.iter().map(|m| m.node_id).collect::<Vec<_>>(),
-            other.members.iter().map(|m| m.node_id).collect::<Vec<_>>(),
+        assert!(
+            itertools::equal(
+                self.members.iter().map(|m| m.node_id),
+                other.members.iter().map(|m| m.node_id)
+            ),
+            "The system currently relies on a consistent view of the replica set state (e.g. for routing decisions and starting partition processors)"
         );
-
         let mut modified = false;
         for (member, incoming_member) in self.members.iter_mut().zip(other.members) {
             if incoming_member.durable_lsn > member.durable_lsn {

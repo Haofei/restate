@@ -76,7 +76,7 @@ async fn edit(env: &CliEnv, opts: &Edit) -> Result<()> {
 
     c_println!("About to submit the new state mutation to the system for processing.");
     c_println!(
-        "If there are currently active invocations, then this mutation will be enqueued to be processed after them."
+        "If there are ongoing invocations for this key this mutation will be enqueued to be processed after them."
     );
     c_println!();
     confirm_or_exit("Are you sure?")?;
@@ -102,7 +102,7 @@ async fn edit(env: &CliEnv, opts: &Edit) -> Result<()> {
     //
 
     c_println!();
-    c_println!("Enqueued successfully for processing");
+    c_println!("Successfully submitted state update.");
 
     Ok(())
 }
