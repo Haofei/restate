@@ -73,7 +73,7 @@ use restate_types::health::HealthStatus;
 use restate_types::identifiers::SnapshotId;
 use restate_types::identifiers::{LeaderEpoch, PartitionId, PartitionKey};
 use restate_types::live::Live;
-use restate_types::logs::{LogId, Lsn, SequenceNumber};
+use restate_types::logs::{Lsn, SequenceNumber};
 use restate_types::metadata_store::keys::partition_processor_epoch_key;
 use restate_types::net::metadata::MetadataKind;
 use restate_types::net::partition_processor::PartitionLeaderService;
@@ -84,6 +84,7 @@ use restate_types::net::partition_processor_manager::{
 use restate_types::net::{RpcRequest as _, UnaryMessage};
 use restate_types::nodes_config::{NodesConfigError, NodesConfiguration, WorkerState};
 use restate_types::partition_table::PartitionTable;
+use restate_types::partitions::Partition;
 use restate_types::partitions::state::PartitionReplicaSetStates;
 use restate_types::protobuf::common::WorkerStatus;
 use restate_types::retries::with_jitter;
@@ -501,6 +502,7 @@ impl PartitionProcessorManager {
                                 }) => {
                                     if self.snapshot_repository.is_some() {
                                         info!(
+                                            %partition_id,
                                             trim_gap_to_lsn = ?to_lsn,
                                             ?sequence_number,
                                             "Partition processor stopped due to a log trim gap, will attempt to fast-forward on restart",
@@ -510,6 +512,7 @@ impl PartitionProcessorManager {
                                         None
                                     } else {
                                         warn!(
+                                            %partition_id,
                                             trim_gap_to_lsn = ?to_lsn,
                                             "Partition processor stopped due to a log trim gap, and no snapshot repository is configured",
                                         );
@@ -517,12 +520,12 @@ impl PartitionProcessorManager {
                                     }
                                 }
                                 Err(err) => {
-                                    warn!(%err, "Partition processor exited unexpectedly");
+                                    warn!(%partition_id, %err, "Partition processor exited unexpectedly");
                                     // todo make delay depending on number of restart attempts
                                     Some(PARTITION_PROCESSOR_ERROR_RESTART_DELAY)
                                 }
                                 Ok(_) => {
-                                    info!("Partition processor stopped");
+                                    info!(%partition_id, "Partition processor stopped");
                                     // immediately try to restart if we are still part of the partition's membership
                                     None
                                 }
@@ -627,8 +630,15 @@ impl PartitionProcessorManager {
 
             self.asynchronous_operations.spawn(
                 async move {
+                    let log_id = Metadata::with_current(|m| {
+                        m.partition_table_ref()
+                            .get(&partition_id)
+                            .map(Partition::log_id)
+                    })
+                    .expect("partition is in partition table");
+
                     let tail = bifrost
-                        .find_tail(LogId::from(partition_id), FindTailOptions::Fast)
+                        .find_tail(log_id, FindTailOptions::Fast)
                         .await
                         .map(|tail| tail.offset())
                         .ok();
@@ -713,6 +723,17 @@ impl PartitionProcessorManager {
                 // PP and the PPManager :-(. Maybe at some point we want to split the struct for it.
                 status.last_persisted_log_lsn = self.partition_store_manager.get_durable_lsn(*partition_id);
                 status.last_archived_log_lsn = self.archived_lsns.get(partition_id).cloned();
+
+                // todo: this will need to be moved to a place where PPM updates it regularly, or
+                // to be directly integrated into durable lsn tracking so we update it immediately
+                // after flush.
+                if let Some(durable_lsn) = status.last_persisted_log_lsn {
+                    self.replica_set_states.note_durable_lsn(
+                        *partition_id,
+                        my_node_id().as_plain(),
+                        durable_lsn,
+                    );
+                }
 
                 let current_tail_lsn = self.target_tail_lsns.get(partition_id).cloned();
 
@@ -982,6 +1003,19 @@ impl PartitionProcessorManager {
 
                 let snapshot_base_path = config.worker.snapshots.snapshots_dir(partition_id);
                 let snapshot_id = SnapshotId::new();
+                let (node_name, cluster_name, cluster_fingerprint) = Metadata::with_current(|m| {
+                    let nodes_config = m.nodes_config_ref();
+                    let node_name = nodes_config
+                        .find_node_by_id(m.my_node_id())
+                        .expect("my node must be present")
+                        .name
+                        .clone();
+                    (
+                        node_name,
+                        nodes_config.cluster_name().to_owned(),
+                        nodes_config.cluster_fingerprint(),
+                    )
+                });
 
                 let create_snapshot_task = SnapshotPartitionTask {
                     snapshot_id,
@@ -989,8 +1023,9 @@ impl PartitionProcessorManager {
                     min_target_lsn,
                     snapshot_base_path,
                     partition_store_manager: self.partition_store_manager.clone(),
-                    cluster_name: config.common.cluster_name().into(),
-                    node_name: config.common.node_name().into(),
+                    cluster_name,
+                    cluster_fingerprint,
+                    node_name,
                     snapshot_repository,
                 };
 
@@ -1055,8 +1090,9 @@ impl PartitionProcessorManager {
                     let archived_lsn = snapshot_repository
                         .get_latest_archived_lsn(partition_id)
                         .await
+                        .inspect(|lsn| debug!(?partition_id, "Latest archived LSN: {}", lsn))
                         .inspect_err(|err| {
-                            info!(?partition_id, "Unable to get latest archived LSN: {}", err)
+                            warn!(?partition_id, "Unable to get latest archived LSN: {}", err)
                         })
                         .ok()
                         .unwrap_or(Lsn::INVALID);

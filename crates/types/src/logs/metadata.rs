@@ -16,6 +16,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use bytestring::ByteString;
 use enum_map::Enum;
+use restate_encoding::BilrostNewType;
 use serde::{Deserialize, Serialize};
 use serde_with::{DisplayFromStr, serde_as};
 use smallvec::SmallVec;
@@ -46,6 +47,7 @@ use crate::{Version, Versioned, flexbuffers_storage_encode_decode};
     derive_more::Into,
     derive_more::Display,
     derive_more::Debug,
+    BilrostNewType,
 )]
 #[repr(transparent)]
 #[serde(transparent)]
@@ -150,13 +152,7 @@ impl ProviderConfiguration {
     pub fn from_configuration(configuration: &Configuration) -> Self {
         ProviderConfiguration::from((
             configuration.bifrost.default_provider,
-            #[allow(deprecated)]
-            configuration
-                .bifrost
-                .replicated_loglet
-                .default_log_replication
-                .clone()
-                .unwrap_or_else(|| configuration.common.default_replication.clone()),
+            configuration.common.default_replication.clone(),
             configuration.bifrost.replicated_loglet.default_nodeset_size,
         ))
     }

@@ -8,36 +8,39 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use codederror::CodedError;
+use tokio::sync::watch;
+use tracing::warn;
+
 use datafusion::catalog::TableProvider;
 use datafusion::error::DataFusionError;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::context::SQLOptions;
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
-use datafusion::physical_optimizer::optimizer::PhysicalOptimizer;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion::sql::TableReference;
-use restate_core::Metadata;
+
+use codederror::CodedError;
+use restate_core::{Metadata, TaskCenter};
 use restate_invoker_api::StatusHandle;
 use restate_partition_store::PartitionStoreManager;
-use restate_types::cluster::cluster_state::ClusterState;
+use restate_types::cluster::cluster_state::LegacyClusterState;
 use restate_types::config::QueryEngineOptions;
 use restate_types::errors::GenericError;
 use restate_types::identifiers::PartitionId;
 use restate_types::live::Live;
 use restate_types::partition_table::Partition;
+use restate_types::partitions::state::PartitionReplicaSetStates;
 use restate_types::schema::deployment::DeploymentResolver;
 use restate_types::schema::service::ServiceMetadataResolver;
-use tokio::sync::watch;
-use tracing::warn;
 
+use crate::analyzer;
 use crate::remote_query_scanner_manager::RemoteScannerManager;
-use crate::{analyzer, physical_optimizer};
 
 const SYS_INVOCATION_VIEW: &str = "CREATE VIEW sys_invocation as SELECT
             ss.id,
@@ -58,6 +61,7 @@ const SYS_INVOCATION_VIEW: &str = "CREATE VIEW sys_invocation as SELECT
             ss.journal_size,
             ss.journal_commands_size,
             ss.created_at,
+            ss.created_using_restate_version,
             ss.modified_at,
             ss.inboxed_at,
             ss.scheduled_at,
@@ -90,8 +94,8 @@ const SYS_INVOCATION_VIEW: &str = "CREATE VIEW sys_invocation as SELECT
             END, 'LargeUtf8') AS status,
             ss.completion_result,
             ss.completion_failure
-        FROM sys_invocation_status ss
-        LEFT JOIN sys_invocation_state sis ON ss.id = sis.id";
+        FROM sys_invocation_state sis
+        RIGHT JOIN sys_invocation_status ss ON ss.id = sis.id";
 
 const CLUSTER_LOGS_TAIL_SEGMENTS_VIEW: &str = "CREATE VIEW logs_tail_segments as SELECT
         l.* FROM logs AS l JOIN (
@@ -212,12 +216,20 @@ where
 }
 
 pub struct ClusterTables {
-    cluster_state_watch: watch::Receiver<Arc<ClusterState>>,
+    cluster_state: restate_types::cluster_state::ClusterState,
+    replica_set_states: PartitionReplicaSetStates,
+    cluster_state_watch: watch::Receiver<Arc<LegacyClusterState>>,
 }
 
 impl ClusterTables {
-    pub fn new(cluster_state_watch: watch::Receiver<Arc<ClusterState>>) -> Self {
+    pub fn new(
+        replica_set_states: PartitionReplicaSetStates,
+        cluster_state_watch: watch::Receiver<Arc<LegacyClusterState>>,
+    ) -> Self {
+        let cluster_state = TaskCenter::with_current(|tc| tc.cluster_state().clone());
         Self {
+            cluster_state,
+            replica_set_states,
             cluster_state_watch,
         }
     }
@@ -226,10 +238,15 @@ impl ClusterTables {
 impl RegisterTable for ClusterTables {
     async fn register(&self, ctx: &QueryContext) -> Result<(), BuildError> {
         let metadata = Metadata::current();
-        crate::node::register_self(ctx, metadata.clone())?;
-        crate::partition::register_self(ctx, metadata.clone())?;
+        crate::node::register_self(ctx, metadata.clone(), self.cluster_state.clone())?;
+        crate::partition::register_self(ctx, metadata.clone(), self.replica_set_states.clone())?;
+        crate::partition_replica_set::register_self(
+            ctx,
+            metadata.clone(),
+            self.cluster_state.clone(),
+            self.replica_set_states.clone(),
+        )?;
         crate::log::register_self(ctx, metadata)?;
-        crate::node_state::register_self(ctx, self.cluster_state_watch.clone())?;
         crate::partition_state::register_self(ctx, self.cluster_state_watch.clone())?;
 
         ctx.datafusion_context
@@ -255,7 +272,8 @@ impl QueryContext {
             options.memory_size.get(),
             options.tmp_dir.clone(),
             options.query_parallelism(),
-        );
+            &options.datafusion_options,
+        )?;
 
         registerer.register(&ctx).await?;
 
@@ -309,7 +327,8 @@ impl QueryContext {
         memory_limit: usize,
         temp_folder: Option<String>,
         default_parallelism: Option<usize>,
-    ) -> Self {
+        datafusion_options: &HashMap<String, String>,
+    ) -> Result<Self, DataFusionError> {
         //
         // build the runtime
         //
@@ -327,9 +346,13 @@ impl QueryContext {
         session_config = session_config.with_target_partitions(default_parallelism.unwrap_or(2));
 
         session_config = session_config
-            .with_allow_symmetric_joins_without_pruning(true)
             .with_information_schema(true)
             .with_default_catalog_and_schema("restate", "public");
+
+        for (k, v) in datafusion_options {
+            session_config.options_mut().set(k, v)?;
+        }
+
         //
         // build the state
         //
@@ -352,28 +375,6 @@ impl QueryContext {
             analyzer::UseSymmetricHashJoinWhenPartitionKeyIsPresent::new(),
         ));
 
-        //
-        // Prepend the join rewrite optimizer to the list of physical optimizers.
-        //
-        // It is important that the join rewrite optimizer will run before ProjectionPushdown::try_embed_to_hash_join.
-        // because the SymmetricHashJoin doesn't support embedded projections out of the box
-        //
-        // If we don't do that, then when translating a HashJoinExc to SymmetricHashJoinExc we will lose the embedded projection
-        // and the query will fail.
-        // For example try the following query without prepending but rather appending:
-        //
-        // 'SELECT  b.service_key FROM sys_invocation_status a JOIN state b on a.target_service_key = b.service_key'
-        //
-        // A far more involved but potentially more robust solution would be wrap the SymmetricHashJoin in a ProjectionExec
-        // If this would become an issue for any reason, then we can explore that alternative.
-        //
-        let join_rewrite = Arc::new(physical_optimizer::JoinRewrite::new());
-        let mut default_physical_optimizer_rules = PhysicalOptimizer::default().rules;
-        default_physical_optimizer_rules.insert(0, join_rewrite);
-
-        state_builder =
-            state_builder.with_physical_optimizer_rules(default_physical_optimizer_rules);
-
         let state = state_builder.build();
 
         let mut ctx = SessionContext::new_with_state(state);
@@ -389,10 +390,10 @@ impl QueryContext {
             .with_allow_ddl(false)
             .with_allow_dml(false);
 
-        Self {
+        Ok(Self {
             sql_options,
             datafusion_context: ctx,
-        }
+        })
     }
 
     pub async fn execute(

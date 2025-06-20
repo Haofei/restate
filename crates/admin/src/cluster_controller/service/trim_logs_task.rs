@@ -8,270 +8,78 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use std::collections::{BTreeMap, HashMap};
-use std::ops::{Add, Deref};
+use std::collections::BTreeMap;
+use std::ops::Add;
 use std::sync::Arc;
-use std::time::Duration;
 
 use futures::future::OptionFuture;
 use futures::never::Never;
-use itertools::Itertools;
-use tokio::sync::watch;
 use tokio::time;
 use tokio::time::{Interval, MissedTickBehavior};
 use tracing::{debug, info, instrument, trace, warn};
 
 use restate_bifrost::Bifrost;
-use restate_core::network::TransportConnect;
-use restate_core::{Metadata, ShutdownError, TaskCenter, TaskKind, my_node_id};
-use restate_metadata_store::MetadataStoreClient;
-use restate_types::cluster::cluster_state::{AliveNode, ClusterState, PartitionProcessorStatus};
+use restate_core::{Metadata, cancellation_token};
+use restate_types::GenerationalNodeId;
+use restate_types::cluster::cluster_state::{
+    AliveNode, LegacyClusterState, PartitionProcessorStatus,
+};
 use restate_types::config::{AdminOptions, Configuration};
-use restate_types::epoch::EpochMetadata;
 use restate_types::identifiers::PartitionId;
+use restate_types::live::LiveLoad;
 use restate_types::logs::{LogId, Lsn, SequenceNumber};
-use restate_types::metadata_store::keys::partition_processor_epoch_key;
-use restate_types::net::metadata::MetadataKind;
-use restate_types::nodes_config::NodesConfiguration;
+use restate_types::partitions::Partition;
 use restate_types::retries::with_jitter;
-use restate_types::{GenerationalNodeId, Version};
 
 use crate::cluster_controller::cluster_state_refresher::ClusterStateWatcher;
-use crate::cluster_controller::observed_cluster_state::ObservedClusterState;
-use crate::cluster_controller::scheduler::Scheduler;
-use crate::cluster_controller::service::Service;
 
-pub enum ClusterControllerState<T> {
-    Follower,
-    Leader(Leader<T>),
-}
-
-impl<T> ClusterControllerState<T>
-where
-    T: TransportConnect,
-{
-    pub fn update(
-        &mut self,
-        service: &Service<T>,
-        nodes_config: &NodesConfiguration,
-        cs: &restate_core::cluster_state::ClusterState,
-    ) {
-        let maybe_leader = {
-            let admin_nodes: Vec<_> = nodes_config
-                .get_admin_nodes()
-                .map(|c| c.current_generation)
-                .sorted()
-                .collect();
-            let states = cs.map_from_ids(admin_nodes.iter().map(Into::into));
-
-            admin_nodes
-                .iter()
-                .zip(states)
-                .filter_map(|(node_id, state)| state.is_alive().then_some(*node_id))
-                .next()
-        };
-
-        // A Cluster Controller is a leader if the node holds the smallest PlainNodeID
-        let is_leader = match maybe_leader {
-            None => false,
-            Some(leader) => leader == my_node_id(),
-        };
-
-        match (is_leader, &self) {
-            (true, ClusterControllerState::Leader(_))
-            | (false, ClusterControllerState::Follower) => {
-                // nothing to do
-            }
-            (true, ClusterControllerState::Follower) => {
-                info!("Cluster controller switching to leader mode");
-                *self = ClusterControllerState::Leader(Leader::from_service(service));
-            }
-            (false, ClusterControllerState::Leader(_)) => {
-                info!(
-                    "Cluster controller switching to follower mode, I think the leader is {}",
-                    maybe_leader.expect("a leader must be identified"),
-                );
-                *self = ClusterControllerState::Follower;
-            }
-        };
-    }
-
-    pub async fn on_leader_event(
-        &mut self,
-        observed_cluster_state: &ObservedClusterState,
-        leader_event: LeaderEvent,
-    ) -> anyhow::Result<()> {
-        match self {
-            ClusterControllerState::Follower => Ok(()),
-            ClusterControllerState::Leader(leader) => {
-                leader
-                    .on_leader_event(observed_cluster_state, leader_event)
-                    .await
-            }
-        }
-    }
-
-    /// Runs the cluster controller state related tasks. It returns [`LeaderEvent`] which need to
-    /// be processed by calling [`Self::on_leader_event`].
-    pub async fn run(&mut self) -> LeaderEvent {
-        match self {
-            Self::Follower => futures::future::pending().await,
-            Self::Leader(leader) => leader.run().await,
-        }
-    }
-
-    pub async fn on_observed_cluster_state(
-        &mut self,
-        observed_cluster_state: &ObservedClusterState,
-        nodes_config: &NodesConfiguration,
-    ) -> anyhow::Result<()> {
-        match self {
-            Self::Follower => Ok(()),
-            Self::Leader(leader) => {
-                leader
-                    .on_observed_cluster_state(observed_cluster_state, nodes_config)
-                    .await
-            }
-        }
-    }
-
-    pub fn reconfigure(&mut self, configuration: &Configuration) {
-        match self {
-            Self::Follower => {}
-            Self::Leader(leader) => leader.reconfigure(configuration),
-        }
-    }
-}
-
-/// Events that are emitted by a leading cluster controller that need to be processed explicitly
-/// because their operations are not cancellation safe.
-#[derive(Debug)]
-pub enum LeaderEvent {
-    TrimLogs,
-    PartitionTableUpdate,
-}
-
-pub struct Leader<T> {
-    bifrost: Bifrost,
-    partition_table_watcher: watch::Receiver<Version>,
-    scheduler: Scheduler<T>,
+pub struct TrimLogsTask {
     cluster_state_watcher: ClusterStateWatcher,
-    log_trim_check_interval: Option<Interval>,
     snapshots_repository_configured: bool,
-    epoch_metadata_rx: tokio::sync::mpsc::Receiver<HashMap<PartitionId, EpochMetadata>>,
+    bifrost: Bifrost,
+    log_trim_check_interval: Option<Interval>,
 }
 
-impl<T> Leader<T>
-where
-    T: TransportConnect,
-{
-    fn from_service(service: &Service<T>) -> Leader<T> {
-        let configuration = service.configuration.pinned();
+impl TrimLogsTask {
+    pub fn new(bifrost: Bifrost, cluster_state_watcher: ClusterStateWatcher) -> Self {
+        let configuration = Configuration::pinned();
 
-        let scheduler = Scheduler::new(
-            service.metadata_writer.clone(),
-            service.networking.clone(),
-            service.replica_set_states.clone(),
-        );
-
-        let log_trim_check_interval = create_log_trim_check_interval(&configuration.admin);
-
-        let (epoch_metadata_tx, epoch_metadata_rx) = tokio::sync::mpsc::channel(1);
-
-        TaskCenter::spawn_unmanaged(TaskKind::Background, "epoch-metadata-fetch", {
-            let metadata_store_client = service.metadata_writer.raw_metadata_store_client().clone();
-
-            async move { Self::fetch_epoch_metadata(metadata_store_client, epoch_metadata_tx).await }
-        }).expect("failed to spawn epoch metadata fetch task");
-
-        let metadata = Metadata::current();
-        let mut leader = Self {
-            bifrost: service.bifrost.clone(),
-            partition_table_watcher: metadata.watch(MetadataKind::PartitionTable),
-            scheduler,
-            cluster_state_watcher: service.cluster_state_refresher.cluster_state_watcher(),
-            log_trim_check_interval,
+        Self {
+            cluster_state_watcher,
+            bifrost,
             snapshots_repository_configured: configuration.worker.snapshots.destination.is_some(),
-            epoch_metadata_rx,
-        };
-
-        leader.partition_table_watcher.mark_changed();
-
-        leader
+            log_trim_check_interval: Self::create_log_trim_check_interval(&configuration.admin),
+        }
     }
 
-    async fn on_observed_cluster_state(
-        &mut self,
-        observed_cluster_state: &ObservedClusterState,
-        nodes_config: &NodesConfiguration,
-    ) -> anyhow::Result<()> {
-        self.scheduler
-            .on_observed_cluster_state(observed_cluster_state, nodes_config)
-            .await?;
+    pub async fn run(mut self) {
+        trace!("Running TrimLogsTask");
 
-        Ok(())
+        cancellation_token()
+            .run_until_cancelled(self.run_inner())
+            .await;
     }
 
-    fn reconfigure(&mut self, configuration: &Configuration) {
-        self.log_trim_check_interval = create_log_trim_check_interval(&configuration.admin);
-    }
+    async fn run_inner(&mut self) -> Never {
+        let mut config_watcher = Configuration::watcher();
+        let mut live_admin_config = Configuration::map_live(|config| &config.admin);
 
-    async fn run(&mut self) -> LeaderEvent {
         loop {
             tokio::select! {
                 Some(_) = OptionFuture::from(self.log_trim_check_interval.as_mut().map(|interval| interval.tick())) => {
-                    return LeaderEvent::TrimLogs;
+                    self.trim_logs().await;
                 }
-                Ok(_) = self.partition_table_watcher.changed() => {
-                    return LeaderEvent::PartitionTableUpdate;
-                }
-                Some(epoch_metadata) = self.epoch_metadata_rx.recv() => {
-                    for (partition_id, epoch_metadata) in epoch_metadata {
-                        let (_, _, current, next) = epoch_metadata.into_inner();
-                        self.scheduler.update_partition_configuration(partition_id, current, next);
-                    }
+                () = config_watcher.changed() => {
+                    self.log_trim_check_interval = Self::create_log_trim_check_interval(live_admin_config.live_load())
                 }
             }
         }
-    }
-
-    pub async fn on_leader_event(
-        &mut self,
-        observed_cluster_state: &ObservedClusterState,
-        leader_event: LeaderEvent,
-    ) -> anyhow::Result<()> {
-        match leader_event {
-            LeaderEvent::TrimLogs => {
-                self.trim_logs().await;
-            }
-            LeaderEvent::PartitionTableUpdate => {
-                self.on_partition_table_update(observed_cluster_state)
-                    .await?;
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn on_partition_table_update(
-        &mut self,
-        observed_cluster_state: &ObservedClusterState,
-    ) -> anyhow::Result<()> {
-        self.scheduler
-            .on_observed_cluster_state(
-                observed_cluster_state,
-                &Metadata::with_current(|m| m.nodes_config_ref()),
-            )
-            .await?;
-
-        Ok(())
     }
 
     #[instrument(
         level = "debug",
         skip(self),
         fields(
-            partition_table_version = %self.partition_table_watcher.borrow().deref(),
             logs_metadata_version = tracing::field::Empty,
         ),
     )]
@@ -299,69 +107,22 @@ where
         }
     }
 
-    async fn fetch_epoch_metadata(
-        metadata_client: MetadataStoreClient,
-        epoch_metadata_tx: tokio::sync::mpsc::Sender<HashMap<PartitionId, EpochMetadata>>,
-    ) -> Result<Never, ShutdownError> {
-        let mut partition_table = Metadata::with_current(|m| m.updateable_partition_table());
+    fn create_log_trim_check_interval(options: &AdminOptions) -> Option<Interval> {
+        options
+            .log_trim_threshold
+            .inspect(|_| info!("The log trim threshold setting is deprecated and will be ignored"));
 
-        loop {
-            debug!("Refreshing epoch metadata from metadata store for all partitions");
-            let send_permit = epoch_metadata_tx
-                .reserve()
-                .await
-                .map_err(|_| ShutdownError)?;
-            let mut latest_epoch_metadata = HashMap::default();
+        options.log_trim_check_interval().map(|interval| {
+            // delay the initial trim check, and introduces small amount of jitter (+/-10%) to avoid synchronization
+            // among partition leaders in case of coordinated cluster restarts
+            let effective_interval = with_jitter(interval, 0.1);
+            let start_at = time::Instant::now().add(effective_interval);
 
-            let partition_table = partition_table.live_load();
-
-            for partition_id in partition_table.iter_ids() {
-                // Stop the loop if we are not leaders anymore
-                if epoch_metadata_tx.is_closed() {
-                    return Err(ShutdownError);
-                }
-                // todo replace with multi get
-                match metadata_client
-                    .get::<EpochMetadata>(partition_processor_epoch_key(*partition_id))
-                    .await
-                {
-                    Ok(Some(epoch_metadata)) => {
-                        latest_epoch_metadata.insert(*partition_id, epoch_metadata);
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        debug!(%err, "Failed to fetch epoch metadata for partition {partition_id}");
-                    }
-                }
-            }
-
-            send_permit.send(latest_epoch_metadata);
-
-            tokio::select! {
-                () = tokio::time::sleep(Duration::from_secs(30)) => {},
-                () = epoch_metadata_tx.closed() => {
-                    return Err(ShutdownError);
-                }
-            }
-        }
+            let mut interval = time::interval_at(start_at, effective_interval);
+            interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            interval
+        })
     }
-}
-
-fn create_log_trim_check_interval(options: &AdminOptions) -> Option<Interval> {
-    options
-        .log_trim_threshold
-        .inspect(|_| info!("The log trim threshold setting is deprecated and will be ignored"));
-
-    options.log_trim_check_interval().map(|interval| {
-        // delay the initial trim check, and introduces small amount of jitter (+/-10%) to avoid synchronization
-        // among partition leaders in case of coordinated cluster restarts
-        let effective_interval = with_jitter(interval, 0.1);
-        let start_at = time::Instant::now().add(effective_interval);
-
-        let mut interval = time::interval_at(start_at, effective_interval);
-        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        interval
-    })
 }
 
 enum TrimMode {
@@ -382,7 +143,10 @@ impl TrimMode {
     /// In clusters with more than one node, or on single nodes with a snapshot repository
     /// configured, trimming is driven by archived LSN. The durable LSN method is only used on
     /// single-nodes with no snapshots configured.
-    fn from(snapshots_repository_configured: bool, cluster_state: &Arc<ClusterState>) -> TrimMode {
+    fn from(
+        snapshots_repository_configured: bool,
+        cluster_state: &Arc<LegacyClusterState>,
+    ) -> TrimMode {
         let mut partition_status: BTreeMap<
             PartitionId,
             BTreeMap<GenerationalNodeId, PartitionProcessorStatus>,
@@ -426,7 +190,12 @@ impl TrimMode {
             // not guarantee that the new snapshot is visible to other cluster members.
             TrimMode::ArchivedLsn { partition_status } => {
                 for (partition_id, processor_status) in partition_status.iter() {
-                    let log_id = LogId::from(*partition_id);
+                    let log_id = Metadata::with_current(|m| {
+                        m.partition_table_ref()
+                            .get(partition_id)
+                            .map(Partition::log_id)
+                    })
+                    .expect("partition is in partition table");
 
                     // We allow trimming of archived partitions even in the presence of dead nodes; such
                     // nodes will be forced to fast-forward over any potential trim gaps when they return.
@@ -468,7 +237,13 @@ impl TrimMode {
                 // we know that there are no known dead nodes, so it's safe to take the min of all
                 // durable LSNs reported by all the partition processors as the safe trim point.
                 for (partition_id, processor_status) in partition_status.iter() {
-                    let log_id = LogId::from(*partition_id);
+                    let log_id = Metadata::with_current(|m| {
+                        m.partition_table_ref()
+                            .get(partition_id)
+                            .map(Partition::log_id)
+                    })
+                    .expect("partition is in partition table");
+
                     let min_durable_lsn = processor_status
                         .values()
                         .map(|s| s.last_persisted_log_lsn.unwrap_or(Lsn::INVALID))
@@ -494,18 +269,23 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use crate::cluster_controller::service::state::TrimMode;
+    use crate::cluster_controller::service::trim_logs_task::TrimMode;
     use RunMode::{Follower, Leader};
+    use restate_core::TestCoreEnvBuilder;
     use restate_types::cluster::cluster_state::{
-        AliveNode, ClusterState, DeadNode, NodeState, PartitionProcessorStatus, RunMode,
+        AliveNode, DeadNode, LegacyClusterState, NodeState, PartitionProcessorStatus, RunMode,
     };
     use restate_types::identifiers::PartitionId;
     use restate_types::logs::{LogId, Lsn, SequenceNumber};
     use restate_types::time::MillisSinceEpoch;
     use restate_types::{GenerationalNodeId, PlainNodeId, Version};
 
-    #[test]
-    fn cluster_without_snapshots_does_not_trim() {
+    #[restate_core::test(start_paused = true)]
+    async fn cluster_without_snapshots_does_not_trim() {
+        TestCoreEnvBuilder::with_incoming_only_connector()
+            .build()
+            .await;
+
         let p1 = PartitionId::from(0);
         let p2 = PartitionId::from(1);
 
@@ -537,7 +317,7 @@ mod tests {
         .into_iter()
         .collect();
 
-        let cluster_state = Arc::new(ClusterState {
+        let cluster_state = Arc::new(LegacyClusterState {
             last_refreshed: None,
             nodes_config_version: Version::MIN,
             partition_table_version: Version::MIN,
@@ -563,8 +343,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cluster_with_dead_node_no_snapshots_does_not_trim() {
+    #[restate_core::test(start_paused = true)]
+    async fn cluster_with_dead_node_no_snapshots_does_not_trim() {
+        TestCoreEnvBuilder::with_incoming_only_connector()
+            .build()
+            .await;
+
         let p1 = PartitionId::from(0);
         let p2 = PartitionId::from(1);
 
@@ -595,7 +379,7 @@ mod tests {
         .collect();
 
         let n2 = GenerationalNodeId::new(2, 0);
-        let cluster_state = Arc::new(ClusterState {
+        let cluster_state = Arc::new(LegacyClusterState {
             last_refreshed: None,
             nodes_config_version: Version::MIN,
             partition_table_version: Version::MIN,
@@ -621,8 +405,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn single_node_may_trim_by_durable_lsn() {
+    #[restate_core::test(start_paused = true)]
+    async fn single_node_may_trim_by_durable_lsn() {
+        TestCoreEnvBuilder::with_incoming_only_connector()
+            .build()
+            .await;
+
         let p1 = PartitionId::from(0);
         let p2 = PartitionId::from(1);
         let p3 = PartitionId::from(2);
@@ -663,7 +451,7 @@ mod tests {
         .into_iter()
         .collect();
 
-        let cluster_state = Arc::new(ClusterState {
+        let cluster_state = Arc::new(LegacyClusterState {
             last_refreshed: None,
             nodes_config_version: Version::MIN,
             partition_table_version: Version::MIN,
@@ -686,8 +474,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cluster_with_snapshots_trims_by_archived_lsn() {
+    #[restate_core::test(start_paused = true)]
+    async fn cluster_with_snapshots_trims_by_archived_lsn() {
+        TestCoreEnvBuilder::with_incoming_only_connector()
+            .build()
+            .await;
+
         let p1 = PartitionId::from(0);
         let p2 = PartitionId::from(1);
         let p3 = PartitionId::from(2);
@@ -744,7 +536,7 @@ mod tests {
         .into_iter()
         .collect();
 
-        let cluster_state = Arc::new(ClusterState {
+        let cluster_state = Arc::new(LegacyClusterState {
             last_refreshed: None,
             nodes_config_version: Version::MIN,
             partition_table_version: Version::MIN,
@@ -771,8 +563,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cluster_with_snapshots_trims_by_min_of_applied_or_archived_lsn() {
+    #[restate_core::test(start_paused = true)]
+    async fn cluster_with_snapshots_trims_by_min_of_applied_or_archived_lsn() {
+        TestCoreEnvBuilder::with_incoming_only_connector()
+            .build()
+            .await;
+
         let p1 = PartitionId::from(0);
 
         let n1 = GenerationalNodeId::new(1, 0);
@@ -803,7 +599,7 @@ mod tests {
         .into_iter()
         .collect();
 
-        let cluster_state = Arc::new(ClusterState {
+        let cluster_state = Arc::new(LegacyClusterState {
             last_refreshed: None,
             nodes_config_version: Version::MIN,
             partition_table_version: Version::MIN,
@@ -827,8 +623,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cluster_with_dead_node_and_snapshots_trims_by_archived_lsn() {
+    #[restate_core::test(start_paused = true)]
+    async fn cluster_with_dead_node_and_snapshots_trims_by_archived_lsn() {
+        TestCoreEnvBuilder::with_incoming_only_connector()
+            .build()
+            .await;
+
         let p1 = PartitionId::from(0);
         let p2 = PartitionId::from(1);
         let p3 = PartitionId::from(2);
@@ -885,7 +685,7 @@ mod tests {
         .into_iter()
         .collect();
 
-        let cluster_state = Arc::new(ClusterState {
+        let cluster_state = Arc::new(LegacyClusterState {
             last_refreshed: None,
             nodes_config_version: Version::MIN,
             partition_table_version: Version::MIN,

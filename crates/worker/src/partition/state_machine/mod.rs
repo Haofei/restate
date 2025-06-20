@@ -13,17 +13,24 @@ mod entries;
 mod lifecycle;
 mod utils;
 
-use crate::metric_definitions::PARTITION_APPLY_COMMAND;
-use crate::partition::state_machine::lifecycle::OnCancelCommand;
-use crate::partition::types::{InvokerEffect, InvokerEffectKind, OutboxMessageExt};
-use ::tracing::{Instrument, Span, debug, trace, warn};
 pub use actions::{Action, ActionCollector};
+
+use std::borrow::Cow;
+use std::collections::HashSet;
+use std::fmt;
+use std::fmt::{Debug, Formatter};
+use std::ops::RangeInclusive;
+use std::str::FromStr;
+use std::time::Instant;
+
 use assert2::let_assert;
 use bytes::Bytes;
 use bytestring::ByteString;
 use enumset::EnumSet;
 use futures::{StreamExt, TryStreamExt};
 use metrics::{Histogram, histogram};
+use tracing::{Instrument, Span, debug, error, trace, warn};
+
 use restate_invoker_api::InvokeInputJournal;
 use restate_service_protocol::codec::ProtobufRawEntryCodec;
 use restate_service_protocol_v4::entry_codec::ServiceProtocolV4Codec;
@@ -59,13 +66,17 @@ use restate_types::identifiers::{
     PartitionProcessorRpcRequestId, ServiceId,
 };
 use restate_types::identifiers::{IdempotencyId, WithPartitionKey};
-use restate_types::invocation::client::InvocationOutputResponse;
+use restate_types::invocation::client::{
+    CancelInvocationResponse, InvocationOutputResponse, KillInvocationResponse,
+    PurgeInvocationResponse,
+};
 use restate_types::invocation::{
-    AttachInvocationRequest, InvocationEpoch, InvocationQuery, InvocationResponse,
-    InvocationTarget, InvocationTargetType, InvocationTermination, JournalCompletionTarget,
-    NotifySignalRequest, ResponseResult, ServiceInvocation, ServiceInvocationResponseSink,
-    ServiceInvocationSpanContext, Source, SubmitNotificationSink, TerminationFlavor,
-    VirtualObjectHandlerType, WorkflowHandlerType,
+    AttachInvocationRequest, IngressInvocationResponseSink, InvocationEpoch,
+    InvocationMutationResponseSink, InvocationQuery, InvocationResponse, InvocationTarget,
+    InvocationTargetType, InvocationTermination, JournalCompletionTarget, NotifySignalRequest,
+    ResponseResult, ServiceInvocation, ServiceInvocationResponseSink, ServiceInvocationSpanContext,
+    Source, SubmitNotificationSink, TerminationFlavor, VirtualObjectHandlerType,
+    WorkflowHandlerType,
 };
 use restate_types::invocation::{InvocationInput, SpanRelation};
 use restate_types::journal::Completion;
@@ -88,18 +99,15 @@ use restate_types::service_protocol::ServiceProtocolVersion;
 use restate_types::state_mut::ExternalStateMutation;
 use restate_types::state_mut::StateMutationVersion;
 use restate_types::time::MillisSinceEpoch;
+use restate_types::{RestateVersion, SemanticRestateVersion};
 use restate_wal_protocol::Command;
 use restate_wal_protocol::timer::TimerKeyDisplay;
 use restate_wal_protocol::timer::TimerKeyValue;
-use std::borrow::Cow;
-use std::collections::HashSet;
-use std::fmt;
-use std::fmt::{Debug, Formatter};
-use std::ops::RangeInclusive;
-use std::str::FromStr;
-use std::time::Instant;
-use tracing::error;
-use utils::SpanExt;
+
+use self::utils::SpanExt;
+use crate::metric_definitions::PARTITION_APPLY_COMMAND;
+use crate::partition::state_machine::lifecycle::OnCancelCommand;
+use crate::partition::types::{InvokerEffect, InvokerEffectKind, OutboxMessageExt};
 
 #[derive(Debug, Hash, enumset::EnumSetType, strum::Display)]
 pub enum ExperimentalFeature {}
@@ -109,6 +117,8 @@ pub struct StateMachine {
     inbox_seq_number: MessageIndex,
     /// First outbox message index.
     outbox_head_seq_number: Option<MessageIndex>,
+    /// The minimum version of restate server that we currently support
+    min_restate_version: SemanticRestateVersion,
     /// Sequence number of the next outbox message to be appended.
     outbox_seq_number: MessageIndex,
     partition_key_range: RangeInclusive<PartitionKey>,
@@ -124,12 +134,21 @@ impl Debug for StateMachine {
             .field("inbox_seq_number", &self.inbox_seq_number)
             .field("outbox_head_seq_number", &self.outbox_head_seq_number)
             .field("outbox_seq_number", &self.outbox_seq_number)
+            .field("min_restate_version", &self.min_restate_version)
             .finish()
     }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(
+        "partition is blocked; requires and upgrade to restate-server version \
+        {required_min_version} or higher; reason='{barrier_reason}'"
+    )]
+    VersionBarrier {
+        required_min_version: SemanticRestateVersion,
+        barrier_reason: String,
+    },
     #[error("failed to deserialize entry: {0}")]
     Codec(#[from] RawEntryCodecError),
     #[error(transparent)]
@@ -194,6 +213,7 @@ impl StateMachine {
         outbox_seq_number: MessageIndex,
         outbox_head_seq_number: Option<MessageIndex>,
         partition_key_range: RangeInclusive<PartitionKey>,
+        min_restate_version: SemanticRestateVersion,
         experimental_features: EnumSet<ExperimentalFeature>,
     ) -> Self {
         let invoker_apply_latency =
@@ -204,6 +224,7 @@ impl StateMachine {
             outbox_head_seq_number,
             partition_key_range,
             invoker_apply_latency,
+            min_restate_version,
             experimental_features,
         }
     }
@@ -215,6 +236,7 @@ pub(crate) struct StateMachineApplyContext<'a, S> {
     inbox_seq_number: &'a mut MessageIndex,
     outbox_seq_number: &'a mut MessageIndex,
     outbox_head_seq_number: &'a mut Option<MessageIndex>,
+    min_restate_version: &'a mut SemanticRestateVersion,
     partition_key_range: RangeInclusive<PartitionKey>,
     invoker_apply_latency: &'a Histogram,
     #[allow(dead_code)]
@@ -245,6 +267,7 @@ impl StateMachine {
                 inbox_seq_number: &mut self.inbox_seq_number,
                 outbox_seq_number: &mut self.outbox_seq_number,
                 outbox_head_seq_number: &mut self.outbox_head_seq_number,
+                min_restate_version: &mut self.min_restate_version,
                 partition_key_range: self.partition_key_range.clone(),
                 invoker_apply_latency: &self.invoker_apply_latency,
                 experimental_features: &self.experimental_features,
@@ -405,6 +428,49 @@ impl<S> StateMachineApplyContext<'_, S> {
             + journal_table_v2::JournalTable,
     {
         match command {
+            Command::VersionBarrier(barrier) => {
+                // We have versions in play:
+                // - Our binary's version (this process)
+                // - `min_restate_version` coming from the FSM
+                // - `barrier.version` from bifrost.
+                //
+                // If we can process this command, we update the FSM.
+                //
+                // We can process this command if our own version is at or higher than the barrier
+                // version as indicated by the message. We'll apply the change to the FSM only
+                // if the new barrier version is higher than what the FSM already has.
+                //
+                // If we can't, then what?
+                //
+                // In v1.4 we crash the PP but tell a good message. This is not the best solution
+                // but it'll make clear what's going on. The issue with this approach is that we
+                // will probably continue restarting PP on the same node leading to unavailability.
+                //
+                // [todo] What's the ideal scenario?
+                // - Ideal scenario is that we inform the operator (flare).
+                // - We mark this node *generational* as a bad candidate (not to take leadership
+                //   or run follower again).
+                // - Through gossip, this node broadcasts its partition block-list so it won't be
+                //   considered for leadership until a new generation pops up.
+                //   Noting that the blocklist for a generational node can only increase/grow until
+                //   the daemon is restarted (higher generation).
+                // - Controller attempts to reconfigure or selects a different leader
+                //   that's not blocking this partition if such replacement exists.
+                // - Peers will not pick this node as leader candidate when performing
+                //   adhoc failovers.
+                if SemanticRestateVersion::current().is_equal_or_newer_than(&barrier.version) {
+                    // Feels amazing to be running a new version of restate!
+                    lifecycle::OnVersionBarrierCommand { barrier }
+                        .apply(self)
+                        .await?;
+                    Ok(())
+                } else {
+                    Err(Error::VersionBarrier {
+                        required_min_version: barrier.version,
+                        barrier_reason: barrier.human_reason.unwrap_or_default(),
+                    })
+                }
+            }
             Command::Invoke(service_invocation) => {
                 self.on_service_invocation(service_invocation).await
             }
@@ -456,6 +522,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             Command::PurgeInvocation(purge_invocation_request) => {
                 lifecycle::OnPurgeCommand {
                     invocation_id: purge_invocation_request.invocation_id,
+                    response_sink: purge_invocation_request.response_sink,
                 }
                 .apply(self)
                 .await?;
@@ -464,6 +531,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             Command::PurgeJournal(purge_invocation_request) => {
                 lifecycle::OnPurgeJournalCommand {
                     invocation_id: purge_invocation_request.invocation_id,
+                    response_sink: purge_invocation_request.response_sink,
                 }
                 .apply(self)
                 .await?;
@@ -501,7 +569,7 @@ impl<S> StateMachineApplyContext<'_, S> {
 
     async fn on_service_invocation(
         &mut self,
-        service_invocation: ServiceInvocation,
+        service_invocation: Box<ServiceInvocation>,
     ) -> Result<(), Error>
     where
         S: IdempotencyTable
@@ -542,7 +610,7 @@ impl<S> StateMachineApplyContext<'_, S> {
         // Prepare PreFlightInvocationMetadata structure
         let submit_notification_sink = service_invocation.submit_notification_sink.take();
         let pre_flight_invocation_metadata =
-            PreFlightInvocationMetadata::from_service_invocation(service_invocation);
+            PreFlightInvocationMetadata::from_service_invocation(*service_invocation);
 
         // 2. Check if we need to schedule it
         let execution_time = pre_flight_invocation_metadata.execution_time;
@@ -603,8 +671,8 @@ impl<S> StateMachineApplyContext<'_, S> {
     /// Returns the invocation in case the invocation is not a duplicate
     async fn handle_duplicated_requests(
         &mut self,
-        mut service_invocation: ServiceInvocation,
-    ) -> Result<Option<ServiceInvocation>, Error>
+        mut service_invocation: Box<ServiceInvocation>,
+    ) -> Result<Option<Box<ServiceInvocation>>, Error>
     where
         S: IdempotencyTable
             + InvocationStatusTable
@@ -907,6 +975,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                     .span_context
                     .clone(),
                 None,
+                in_flight_invocation_metadata.current_invocation_epoch,
                 // This is safe to do as only the leader will execute the invoker command
                 MillisSinceEpoch::now(),
             ),
@@ -998,6 +1067,7 @@ impl<S> StateMachineApplyContext<'_, S> {
         InvocationTermination {
             invocation_id,
             flavor: termination_flavor,
+            response_sink,
         }: InvocationTermination,
     ) -> Result<(), Error>
     where
@@ -1013,12 +1083,19 @@ impl<S> StateMachineApplyContext<'_, S> {
             + PromiseTable,
     {
         match termination_flavor {
-            TerminationFlavor::Kill => self.on_kill_invocation(invocation_id).await,
-            TerminationFlavor::Cancel => self.on_cancel_invocation(invocation_id).await,
+            TerminationFlavor::Kill => self.on_kill_invocation(invocation_id, response_sink).await,
+            TerminationFlavor::Cancel => {
+                self.on_cancel_invocation(invocation_id, response_sink)
+                    .await
+            }
         }
     }
 
-    async fn on_kill_invocation(&mut self, invocation_id: InvocationId) -> Result<(), Error>
+    async fn on_kill_invocation(
+        &mut self,
+        invocation_id: InvocationId,
+        response_sink: Option<InvocationMutationResponseSink>,
+    ) -> Result<(), Error>
     where
         S: VirtualObjectStatusTable
             + InvocationStatusTable
@@ -1037,14 +1114,17 @@ impl<S> StateMachineApplyContext<'_, S> {
             InvocationStatus::Invoked(metadata) => {
                 self.kill_invoked_invocation(invocation_id, metadata)
                     .await?;
+                self.reply_to_kill(response_sink, KillInvocationResponse::Ok);
             }
             InvocationStatus::Suspended { metadata, .. } => {
                 self.kill_suspended_invocation(invocation_id, metadata)
                     .await?;
+                self.reply_to_kill(response_sink, KillInvocationResponse::Ok);
             }
             InvocationStatus::Inboxed(inboxed) => {
                 self.terminate_inboxed_invocation(TerminationFlavor::Kill, invocation_id, inboxed)
-                    .await?
+                    .await?;
+                self.reply_to_kill(response_sink, KillInvocationResponse::Ok);
             }
             InvocationStatus::Scheduled(scheduled) => {
                 self.terminate_scheduled_invocation(
@@ -1052,12 +1132,14 @@ impl<S> StateMachineApplyContext<'_, S> {
                     invocation_id,
                     scheduled,
                 )
-                .await?
+                .await?;
+                self.reply_to_kill(response_sink, KillInvocationResponse::Ok);
             }
             InvocationStatus::Completed(_) => {
                 debug!(
                     "Received kill command for completed invocation '{invocation_id}'. To cleanup the invocation after it's been completed, use the purge invocation command."
                 );
+                self.reply_to_kill(response_sink, KillInvocationResponse::AlreadyCompleted);
             }
             InvocationStatus::Free => {
                 trace!("Received kill command for unknown invocation with id '{invocation_id}'.");
@@ -1068,13 +1150,18 @@ impl<S> StateMachineApplyContext<'_, S> {
                 // and the abort message can overtake the invoke/resume.
                 // Consequently the invoker might have not received the abort and the user tried to send it again.
                 self.do_send_abort_invocation_to_invoker(invocation_id, InvocationEpoch::MAX);
+                self.reply_to_kill(response_sink, KillInvocationResponse::NotFound);
             }
         };
 
         Ok(())
     }
 
-    async fn on_cancel_invocation(&mut self, invocation_id: InvocationId) -> Result<(), Error>
+    async fn on_cancel_invocation(
+        &mut self,
+        invocation_id: InvocationId,
+        response_sink: Option<InvocationMutationResponseSink>,
+    ) -> Result<(), Error>
     where
         S: VirtualObjectStatusTable
             + InvocationStatusTable
@@ -1098,6 +1185,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                 OnCancelCommand {
                     invocation_id,
                     invocation_status: status,
+                    response_sink,
                 }
                 .apply(self)
                 .await?;
@@ -1129,6 +1217,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                 self.storage
                     .put_invocation_status(&invocation_id, &status)
                     .await?;
+                self.reply_to_cancel(response_sink, CancelInvocationResponse::Appended);
                 return Ok(());
             }
             _ => {
@@ -1144,6 +1233,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                     metadata.journal_metadata.length,
                 )
                 .await?;
+                self.reply_to_cancel(response_sink, CancelInvocationResponse::Appended);
             }
             InvocationStatus::Suspended {
                 metadata,
@@ -1167,6 +1257,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                 {
                     self.do_resume_service( invocation_id, metadata).await?;
                 }
+                self.reply_to_cancel(response_sink, CancelInvocationResponse::Appended);
             }
             InvocationStatus::Inboxed(inboxed) => {
                 self.terminate_inboxed_invocation(
@@ -1174,7 +1265,8 @@ impl<S> StateMachineApplyContext<'_, S> {
                     invocation_id,
                     inboxed,
                 )
-                .await?
+                .await?;
+                self.reply_to_cancel(response_sink, CancelInvocationResponse::Done);
             }
             InvocationStatus::Scheduled(scheduled) => {
                 self.terminate_scheduled_invocation(
@@ -1182,10 +1274,14 @@ impl<S> StateMachineApplyContext<'_, S> {
                     invocation_id,
                     scheduled,
                 )
-                .await?
+                .await?;
+                self.reply_to_cancel(response_sink, CancelInvocationResponse::Done);
             }
             InvocationStatus::Completed(_) => {
-                debug!("Received cancel command for completed invocation '{invocation_id}'. To cleanup the invocation after it's been completed, use the purge invocation command.");
+                debug!(
+                    "Received cancel command for completed invocation '{invocation_id}'. To cleanup the invocation after it's been completed, use the purge invocation command."
+                );
+                self.reply_to_cancel(response_sink, CancelInvocationResponse::AlreadyCompleted);
             }
             InvocationStatus::Free => {
                 trace!("Received cancel command for unknown invocation with id '{invocation_id}'.");
@@ -1196,6 +1292,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                 // and the abort message can overtake the invoke/resume.
                 // Consequently the invoker might have not received the abort and the user tried to send it again.
                 self.do_send_abort_invocation_to_invoker(invocation_id, InvocationEpoch::MAX);
+                self.reply_to_cancel(response_sink, CancelInvocationResponse::NotFound);
             }
         };
 
@@ -1431,9 +1528,13 @@ impl<S> StateMachineApplyContext<'_, S> {
                 .await?
         };
 
-        for id in invocation_ids_to_kill {
+        for invocation_id in invocation_ids_to_kill {
             self.handle_outgoing_message(OutboxMessage::InvocationTermination(
-                InvocationTermination::kill(id),
+                InvocationTermination {
+                    invocation_id,
+                    flavor: TerminationFlavor::Kill,
+                    response_sink: None,
+                },
             ))
             .await?;
         }
@@ -1481,7 +1582,11 @@ impl<S> StateMachineApplyContext<'_, S> {
                     // For calls, we don't immediately complete the call entry with cancelled,
                     // but we let the cancellation result propagate from the callee.
                     self.handle_outgoing_message(OutboxMessage::InvocationTermination(
-                        InvocationTermination::cancel(enrichment_result.invocation_id),
+                        InvocationTermination {
+                            invocation_id: enrichment_result.invocation_id,
+                            flavor: TerminationFlavor::Cancel,
+                            response_sink: None,
+                        },
                     ))
                     .await?;
                 }
@@ -1558,60 +1663,6 @@ impl<S> StateMachineApplyContext<'_, S> {
         }
     }
 
-    async fn on_purge_invocation(&mut self, invocation_id: InvocationId) -> Result<(), Error>
-    where
-        S: InvocationStatusTable
-            + IdempotencyTable
-            + VirtualObjectStatusTable
-            + StateTable
-            + PromiseTable,
-    {
-        match self.get_invocation_status(&invocation_id).await? {
-            InvocationStatus::Completed(CompletedInvocation {
-                invocation_target,
-                idempotency_key,
-                ..
-            }) => {
-                self.do_free_invocation(invocation_id).await?;
-
-                // Also cleanup the associated idempotency key if any
-                if let Some(idempotency_key) = idempotency_key {
-                    self.do_delete_idempotency_id(IdempotencyId::combine(
-                        invocation_id,
-                        &invocation_target,
-                        idempotency_key,
-                    ))
-                    .await?;
-                }
-
-                // For workflow, we should also clean up the service lock, associated state and promises.
-                if invocation_target.invocation_target_ty()
-                    == InvocationTargetType::Workflow(WorkflowHandlerType::Workflow)
-                {
-                    let service_id = invocation_target
-                        .as_keyed_service_id()
-                        .expect("Workflow methods must have keyed service id");
-
-                    self.do_unlock_service(service_id.clone()).await?;
-                    self.do_clear_all_state(service_id.clone(), invocation_id)
-                        .await?;
-                    self.do_clear_all_promises(service_id).await?;
-                }
-            }
-            InvocationStatus::Free => {
-                trace!("Received purge command for unknown invocation with id '{invocation_id}'.");
-                // Nothing to do
-            }
-            _ => {
-                trace!(
-                    "Ignoring purge command as the invocation '{invocation_id}' is still ongoing."
-                );
-            }
-        };
-
-        Ok(())
-    }
-
     async fn on_timer(&mut self, timer_value: TimerKeyValue) -> Result<(), Error>
     where
         S: IdempotencyTable
@@ -1666,7 +1717,13 @@ impl<S> StateMachineApplyContext<'_, S> {
                 self.on_service_invocation(service_invocation).await
             }
             Timer::CleanInvocationStatus(invocation_id) => {
-                self.on_purge_invocation(invocation_id).await
+                lifecycle::OnPurgeCommand {
+                    invocation_id,
+                    response_sink: None,
+                }
+                .apply(self)
+                .await?;
+                Ok(())
             }
             Timer::NeoInvoke(invocation_id) => self.on_neo_invoke_timer(invocation_id).await,
         }
@@ -1748,11 +1805,7 @@ impl<S> StateMachineApplyContext<'_, S> {
 
     async fn on_invoker_effect(
         &mut self,
-        InvokerEffect {
-            invocation_id,
-            invocation_epoch: effect_invocation_epoch,
-            kind,
-        }: InvokerEffect,
+        effect: InvokerEffect,
         invocation_status: InvocationStatus,
     ) -> Result<(), Error>
     where
@@ -1773,7 +1826,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             trace!(
                 "Received invoker effect for invocation not in invoked status. Ignoring the effect."
             );
-            self.do_send_abort_invocation_to_invoker(invocation_id, effect_invocation_epoch);
+            self.do_send_abort_invocation_to_invoker(effect.invocation_id, effect.invocation_epoch);
             return Ok(());
         }
 
@@ -1781,19 +1834,19 @@ impl<S> StateMachineApplyContext<'_, S> {
             .get_invocation_metadata()
             .expect("Should be present because it's invoked")
             .current_invocation_epoch;
-        if current_invocation_epoch != effect_invocation_epoch {
+        if current_invocation_epoch != effect.invocation_epoch {
             trace!(
                 "Received invoker effect for invocation with different epoch. Current epoch {} != Invoker effect epoch {}. Ignoring the effect.",
-                current_invocation_epoch, effect_invocation_epoch
+                current_invocation_epoch, effect.invocation_epoch
             );
-            self.do_send_abort_invocation_to_invoker(invocation_id, effect_invocation_epoch);
+            self.do_send_abort_invocation_to_invoker(effect.invocation_id, effect.invocation_epoch);
             return Ok(());
         }
 
-        match kind {
+        match effect.kind {
             InvokerEffectKind::PinnedDeployment(pinned_deployment) => {
                 lifecycle::OnPinnedDeploymentCommand {
-                    invocation_id,
+                    invocation_id: effect.invocation_id,
                     invocation_status,
                     pinned_deployment,
                 }
@@ -1802,7 +1855,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             }
             InvokerEffectKind::JournalEntry { entry_index, entry } => {
                 self.handle_journal_entry(
-                    invocation_id,
+                    effect.invocation_id,
                     entry_index,
                     entry,
                     invocation_status
@@ -1816,7 +1869,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                 entry,
             } => {
                 entries::OnJournalEntryCommand::from_raw_entry(
-                    invocation_id,
+                    effect.invocation_id,
                     invocation_status,
                     entry,
                 )
@@ -1824,8 +1877,8 @@ impl<S> StateMachineApplyContext<'_, S> {
                 .await?;
                 if let Some(command_index_to_ack) = command_index_to_ack {
                     self.action_collector.push(Action::AckStoredCommand {
-                        invocation_id,
-                        invocation_epoch: effect_invocation_epoch,
+                        invocation_id: effect.invocation_id,
+                        invocation_epoch: effect.invocation_epoch,
                         command_index: command_index_to_ack,
                     });
                 }
@@ -1838,13 +1891,14 @@ impl<S> StateMachineApplyContext<'_, S> {
                     .expect("Must be present if status is invoked");
                 debug_assert!(
                     !waiting_for_completed_entries.is_empty(),
-                    "Expecting at least one entry on which the invocation {invocation_id} is waiting."
+                    "Expecting at least one entry on which the invocation {} is waiting.",
+                    effect.invocation_id
                 );
                 let mut any_completed = false;
                 for entry_index in &waiting_for_completed_entries {
                     if ReadOnlyJournalTable::get_journal_entry(
                         self.storage,
-                        &invocation_id,
+                        &effect.invocation_id,
                         *entry_index,
                     )
                     .await?
@@ -1853,18 +1907,18 @@ impl<S> StateMachineApplyContext<'_, S> {
                     {
                         trace!(
                             rpc.service = %invocation_metadata.invocation_target.service_name(),
-                            reself.storage.invocation.id = %invocation_id,
+                            restate.invocation.id = %effect.invocation_id,
                             "Resuming instead of suspending service because an awaited entry is completed/acked.");
                         any_completed = true;
                         break;
                     }
                 }
                 if any_completed {
-                    self.do_resume_service(invocation_id, invocation_metadata)
+                    self.do_resume_service(effect.invocation_id, invocation_metadata)
                         .await?;
                 } else {
                     self.do_suspend_service(
-                        invocation_id,
+                        effect.invocation_id,
                         invocation_metadata,
                         waiting_for_completed_entries,
                     )
@@ -1875,7 +1929,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                 waiting_for_notifications,
             } => {
                 lifecycle::OnSuspendCommand {
-                    invocation_id,
+                    invocation_id: effect.invocation_id,
                     invocation_status,
                     waiting_for_notifications,
                 }
@@ -1884,7 +1938,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             }
             InvokerEffectKind::End => {
                 self.end_invocation(
-                    invocation_id,
+                    effect.invocation_id,
                     invocation_status
                         .into_invocation_metadata()
                         .expect("Must be present if status is invoked"),
@@ -1894,7 +1948,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             }
             InvokerEffectKind::Failed(e) => {
                 self.end_invocation(
-                    invocation_id,
+                    effect.invocation_id,
                     invocation_status
                         .into_invocation_metadata()
                         .expect("Must be present if status is invoked"),
@@ -2585,7 +2639,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                             journal_entry.deserialize_entry_ref::<ProtobufRawEntryCodec>()?
                     );
 
-                    let service_invocation = ServiceInvocation {
+                    let service_invocation = Box::new(ServiceInvocation {
                         invocation_id: *callee_invocation_id,
                         invocation_target: callee_invocation_target.clone(),
                         argument: request.parameter,
@@ -2607,7 +2661,8 @@ impl<S> StateMachineApplyContext<'_, S> {
                         journal_retention_duration: Default::default(),
                         idempotency_key: request.idempotency_key,
                         submit_notification_sink: None,
-                    };
+                        restate_version: RestateVersion::current(),
+                    });
 
                     self.handle_outgoing_message(OutboxMessage::ServiceInvocation(
                         service_invocation,
@@ -2657,7 +2712,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                     span.add_link(ctx, Vec::default());
                 }
 
-                let service_invocation = ServiceInvocation {
+                let service_invocation = Box::new(ServiceInvocation {
                     invocation_id: *callee_invocation_id,
                     invocation_target: callee_invocation_target.clone(),
                     argument: request.parameter,
@@ -2673,7 +2728,8 @@ impl<S> StateMachineApplyContext<'_, S> {
                     journal_retention_duration: Default::default(),
                     idempotency_key: request.idempotency_key,
                     submit_notification_sink: None,
-                };
+                    restate_version: RestateVersion::current(),
+                });
 
                 self.handle_outgoing_message(OutboxMessage::ServiceInvocation(service_invocation))
                     .await?;
@@ -2929,6 +2985,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                 InvocationTermination {
                     invocation_id: target_invocation_id,
                     flavor: TerminationFlavor::Cancel,
+                    response_sink: None,
                 },
             ))
             .await?;
@@ -3346,6 +3403,100 @@ impl<S> StateMachineApplyContext<'_, S> {
             completion_expiry_time,
             response,
         });
+    }
+
+    fn reply_to_cancel(
+        &mut self,
+        response_sink: Option<InvocationMutationResponseSink>,
+        response: CancelInvocationResponse,
+    ) {
+        if response_sink.is_none() {
+            return;
+        }
+        let InvocationMutationResponseSink::Ingress(IngressInvocationResponseSink { request_id }) =
+            response_sink.unwrap();
+        debug_if_leader!(
+            self.is_leader,
+            "Send cancel response to request id '{:?}': {:?}",
+            request_id,
+            response
+        );
+
+        self.action_collector.push(Action::ForwardCancelResponse {
+            request_id,
+            response,
+        });
+    }
+
+    fn reply_to_kill(
+        &mut self,
+        response_sink: Option<InvocationMutationResponseSink>,
+        response: KillInvocationResponse,
+    ) {
+        if response_sink.is_none() {
+            return;
+        }
+        let InvocationMutationResponseSink::Ingress(IngressInvocationResponseSink { request_id }) =
+            response_sink.unwrap();
+        debug_if_leader!(
+            self.is_leader,
+            "Send kill response to request id '{:?}': {:?}",
+            request_id,
+            response
+        );
+
+        self.action_collector.push(Action::ForwardKillResponse {
+            request_id,
+            response,
+        });
+    }
+
+    fn reply_to_purge_invocation(
+        &mut self,
+        response_sink: Option<InvocationMutationResponseSink>,
+        response: PurgeInvocationResponse,
+    ) {
+        if response_sink.is_none() {
+            return;
+        }
+        let InvocationMutationResponseSink::Ingress(IngressInvocationResponseSink { request_id }) =
+            response_sink.unwrap();
+        debug_if_leader!(
+            self.is_leader,
+            "Send purge response to request id '{:?}': {:?}",
+            request_id,
+            response
+        );
+
+        self.action_collector
+            .push(Action::ForwardPurgeInvocationResponse {
+                request_id,
+                response,
+            });
+    }
+
+    fn reply_to_purge_journal(
+        &mut self,
+        response_sink: Option<InvocationMutationResponseSink>,
+        response: PurgeInvocationResponse,
+    ) {
+        if response_sink.is_none() {
+            return;
+        }
+        let InvocationMutationResponseSink::Ingress(IngressInvocationResponseSink { request_id }) =
+            response_sink.unwrap();
+        debug_if_leader!(
+            self.is_leader,
+            "Send purge response to request id '{:?}': {:?}",
+            request_id,
+            response
+        );
+
+        self.action_collector
+            .push(Action::ForwardPurgeJournalResponse {
+                request_id,
+                response,
+            });
     }
 
     fn send_submit_notification_if_needed(

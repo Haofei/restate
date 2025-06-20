@@ -75,6 +75,8 @@ impl HttpClient {
         builder.timer(hyper_util::rt::TokioTimer::default());
 
         builder
+            .http2_initial_max_send_streams(options.initial_max_send_streams)
+            .http2_adaptive_window(true)
             .http2_keep_alive_timeout(options.http_keep_alive_options.timeout.into())
             .http2_keep_alive_interval(Some(options.http_keep_alive_options.interval.into()));
 
@@ -245,10 +247,13 @@ struct FormatHyperError<'a>(&'a hyper_util::client::legacy::Error);
 
 impl fmt::Display for FormatHyperError<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(source) = self.0.source() {
-            write!(f, "{}, {}", self.0, source)
-        } else {
-            write!(f, "{}", self.0)
+        write!(f, "{}", self.0)?;
+        let mut source = self.0.source();
+        while let Some(err) = source {
+            write!(f, " caused by: {}", err)?;
+            source = err.source();
         }
+
+        Ok(())
     }
 }

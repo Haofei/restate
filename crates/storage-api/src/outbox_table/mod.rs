@@ -14,14 +14,13 @@ use restate_types::invocation::{
     AttachInvocationRequest, InvocationResponse, InvocationTermination, NotifySignalRequest,
     ServiceInvocation,
 };
-use std::future::Future;
 use std::ops::RangeInclusive;
 
 /// Types of outbox messages.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum OutboxMessage {
     /// Service invocation to send to another partition processor
-    ServiceInvocation(ServiceInvocation),
+    ServiceInvocation(Box<ServiceInvocation>),
 
     /// Service response to sent to another partition processor
     ServiceResponse(InvocationResponse),

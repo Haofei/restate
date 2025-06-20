@@ -179,6 +179,10 @@ pub struct InvokerOptions {
     #[cfg_attr(feature = "schemars", schemars(skip))]
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     pub disable_eager_state: bool,
+
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    experimental_features_propose_events: bool,
 }
 
 impl InvokerOptions {
@@ -199,6 +203,10 @@ impl InvokerOptions {
     pub fn message_size_limit(&self) -> Option<usize> {
         self.message_size_limit.map(Into::into)
     }
+
+    pub fn experimental_features_propose_events(&self) -> bool {
+        self.experimental_features_propose_events
+    }
 }
 
 impl Default for InvokerOptions {
@@ -217,8 +225,9 @@ impl Default for InvokerOptions {
             message_size_warning: NonZeroUsize::new(10 * 1024 * 1024).unwrap(), // 10MiB
             message_size_limit: None,
             tmp_dir: None,
-            concurrent_invocations_limit: None,
+            concurrent_invocations_limit: Some(NonZeroUsize::new(1000).expect("is non zero")),
             disable_eager_state: false,
+            experimental_features_propose_events: false,
         }
     }
 }
@@ -263,13 +272,15 @@ pub struct StorageOptions {
     /// This configuration option is deprecated and ignored in Restate >= 1.3.3.
     #[serde_as(as = "Option<serde_with::DisplayFromStr>")]
     #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
-    #[deprecated(since = "1.3.3", note = "no longer used, will be removed with 1.4.0")]
+    #[deprecated(since = "1.4.0", note = "no longer used, will be removed with >1.4.0")]
+    #[serde(skip_serializing)]
     persist_lsn_interval: Option<humantime::Duration>,
 
     /// # Persist LSN threshold (deprecated)
     ///
     /// This configuration option is deprecated and ignored in Restate >= 1.3.3.
-    #[deprecated(since = "1.3.3", note = "no longer used, will be removed with 1.4.0")]
+    #[deprecated(since = "1.4.0", note = "no longer used, will be removed with >1.4.0")]
+    #[serde(skip_serializing)]
     pub persist_lsn_threshold: Option<u64>,
 
     /// Whether to perform commits in background IO thread pools eagerly or not

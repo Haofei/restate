@@ -27,7 +27,7 @@ use restate_bifrost::BifrostService;
 use restate_core::network::{
     GrpcConnector, MessageRouterBuilder, NetworkServerBuilder, Networking,
 };
-use restate_core::partitions::{PartitionRoutingRefresher, spawn_partition_routing_refresher};
+use restate_core::partitions::PartitionRouting;
 use restate_core::{Metadata, MetadataKind, MetadataWriter, TaskKind};
 use restate_core::{MetadataBuilder, MetadataManager, TaskCenter, spawn_metadata_manager};
 use restate_futures_util::overdue::OverdueLoggingExt;
@@ -42,7 +42,7 @@ use restate_types::health::NodeStatus;
 use restate_types::live::Live;
 use restate_types::live::LiveLoadExt;
 use restate_types::logs::RecordCache;
-use restate_types::logs::metadata::{Logs, LogsConfiguration, ProviderConfiguration};
+use restate_types::logs::metadata::{Logs, LogsConfiguration, ProviderConfiguration, ProviderKind};
 use restate_types::metadata::{GlobalMetadata, Precondition};
 use restate_types::nodes_config::{NodeConfig, NodesConfiguration, Role};
 use restate_types::partition_table::{PartitionReplication, PartitionTable, PartitionTableBuilder};
@@ -123,7 +123,6 @@ pub struct Node {
     server_builder: NetworkServerBuilder,
     updateable_config: Live<Configuration>,
     metadata_manager: MetadataManager,
-    partition_routing_refresher: PartitionRoutingRefresher,
     bifrost: BifrostService,
     metadata_server_role: Option<BoxedMetadataServer>,
     failure_detector: FailureDetector<Networking<GrpcConnector>>,
@@ -150,6 +149,7 @@ impl Node {
         // We need to se the global metadata as soon as possible since the metadata store client's
         // auto update functionality won't be started if the global metadata is not set.
         let is_set = TaskCenter::try_set_global_metadata(metadata.clone());
+        let tc = TaskCenter::current();
         debug_assert!(is_set, "Global metadata was already set");
 
         let is_provisioned =
@@ -167,12 +167,11 @@ impl Node {
         ) && config.has_role(Role::MetadataServer)
         {
             return Err(BuildError::InvalidConfiguration(anyhow::anyhow!(
-                "Detected possible misconfiguration. This node runs a \"{}\" metadata \
+                "Detected possible misconfiguration. This node runs a metadata \
                 server but is configured to use the \"{}\" metadata client. If you \
                 don't want to run a metadata server, remove the metadata-server role. If you \
-                want to use the Restate metadata store, then set \
+                would like to use the Restate metadata store, then set \
                 metadata-client.type = \"replicated\" or leave it unset",
-                config.metadata_server.kind(),
                 config.common.metadata_client.kind,
             )));
         };
@@ -181,7 +180,7 @@ impl Node {
         {
             restate_metadata_server::create_metadata_server_and_client(
                 updateable_config.clone(),
-                TaskCenter::with_current(|tc| tc.health().metadata_server_status()),
+                tc.health().metadata_server_status(),
                 &mut server_builder,
             )
             .await
@@ -199,7 +198,6 @@ impl Node {
         let mut router_builder = MessageRouterBuilder::default();
         let networking = Networking::with_grpc_connector();
         metadata_manager.register_in_message_router(&mut router_builder);
-        let partition_routing_refresher = PartitionRoutingRefresher::default();
         let replica_set_states = PartitionReplicaSetStates::default();
 
         let record_cache = RecordCache::new(
@@ -209,8 +207,7 @@ impl Node {
                 .as_usize(),
         );
 
-        // Setup bifrost
-        // replicated-loglet
+        // Setup Bifrost replicated-loglet
         let replicated_loglet_factory = restate_bifrost::providers::replicated_loglet::Factory::new(
             networking.clone(),
             record_cache.clone(),
@@ -236,7 +233,7 @@ impl Node {
         let log_server = if config.has_role(Role::LogServer) {
             Some(
                 LogServerService::create(
-                    TaskCenter::with_current(|tc| tc.health().log_server_status()),
+                    tc.health().log_server_status(),
                     updateable_config.clone(),
                     metadata.clone(),
                     record_cache,
@@ -252,9 +249,9 @@ impl Node {
         let worker_role = if config.has_role(Role::Worker) {
             Some(
                 WorkerRole::create(
-                    TaskCenter::with_current(|tc| tc.health().worker_status()),
+                    tc.health().worker_status(),
                     metadata.clone(),
-                    partition_routing_refresher.partition_routing(),
+                    PartitionRouting::new(replica_set_states.clone(), tc.clone()),
                     replica_set_states.clone(),
                     updateable_config.clone(),
                     &mut router_builder,
@@ -293,11 +290,11 @@ impl Node {
                     .clone()
                     .map(|config| &config.ingress)
                     .boxed(),
-                TaskCenter::with_current(|tc| tc.health().ingress_status()),
+                tc.health().ingress_status(),
                 networking.clone(),
                 metadata.updateable_schema(),
                 metadata.updateable_partition_table(),
-                partition_routing_refresher.partition_routing(),
+                PartitionRouting::new(replica_set_states.clone(), tc.clone()),
             ))
         } else {
             None
@@ -306,10 +303,11 @@ impl Node {
         let admin_role = if config.has_role(Role::Admin) {
             Some(
                 AdminRole::create(
-                    TaskCenter::with_current(|tc| tc.health().admin_status()),
+                    tc.health().admin_status(),
                     bifrost.clone(),
                     updateable_config.clone(),
-                    partition_routing_refresher.partition_routing(),
+                    PartitionRouting::new(replica_set_states.clone(), tc),
+                    metadata.updateable_partition_table(),
                     replica_set_states.clone(),
                     networking.clone(),
                     metadata,
@@ -345,7 +343,6 @@ impl Node {
         Ok(Node {
             updateable_config,
             metadata_manager,
-            partition_routing_refresher,
             bifrost: bifrost_svc,
             metadata_server_role: metadata_store_role,
             failure_detector,
@@ -458,9 +455,9 @@ impl Node {
             .context("Failed initializing the node")?;
 
         self.failure_detector
-            .start(self.updateable_config.map(|c| &c.common.gossip))?;
+            .start(self.updateable_config.clone().map(|c| &c.common.gossip))?;
 
-        // wait for initial metadata sync.
+        // Wait for initial metadata sync.
         //
         // Note that the sync can happen via adhoc peer-to-peer connection since failure
         // detector/gossip service has been started as well.
@@ -487,31 +484,37 @@ impl Node {
             }
         };
 
-        // Ensures bifrost has initial metadata synced up before starting the worker.
-        // Need to run start in new tc scope to have access to metadata()
+        // Bifrost expects metadata to be in sync, which it is by this point.
         self.bifrost.start().await?;
 
+        let nodes_config = metadata.nodes_config_ref();
         info!(
-            name = %my_node_config.name,
+            node_name = %my_node_config.name,
             roles = %my_node_config.roles,
             address = %my_node_config.address,
             location = %my_node_config.location,
             nodes_config_version = %metadata.nodes_config_version(),
+            cluster_name = %nodes_config.cluster_name(),
+            cluster_fingerprint =?nodes_config.cluster_fingerprint(),
             %partition_table_version,
             %logs_version,
             "My Node ID is {}", my_node_config.current_generation,
         );
 
-        let nodes_config = metadata.nodes_config_ref();
         let my_node_id = metadata.my_node_id();
         debug_assert!(nodes_config.find_node_by_id(my_node_id).is_ok());
+
+        migrate_logs_configuration_to_replicated_if_needed(
+            &nodes_config,
+            &metadata,
+            &metadata_writer,
+            &config,
+        )
+        .await?;
 
         if let Some(log_server) = self.log_server {
             log_server.start(metadata_writer).await?;
         }
-
-        // Start partition routing information refresher
-        spawn_partition_routing_refresher(self.partition_routing_refresher)?;
 
         if let Some(ingress_role) = self.ingress_role {
             TaskCenter::spawn(TaskKind::IngressServer, "ingress-http", ingress_role.run())?;
@@ -607,15 +610,7 @@ impl ClusterConfiguration {
     pub fn from_configuration(configuration: &Configuration) -> Self {
         ClusterConfiguration {
             num_partitions: configuration.common.default_num_partitions,
-            partition_replication: {
-                #[allow(deprecated)]
-                configuration
-                    .admin
-                    .default_partition_replication
-                    .clone()
-                    .unwrap_or_else(|| configuration.common.default_replication.clone())
-                    .into()
-            },
+            partition_replication: configuration.common.default_replication.clone().into(),
             bifrost_provider: ProviderConfiguration::from_configuration(configuration),
         }
     }
@@ -757,3 +752,71 @@ async fn write_initial_logs_dont_fail_if_it_exists(
 
 #[derive(Debug)]
 struct AlreadyInitialized;
+
+/// Update the logs configuration metadata on single nodes, if it is still using the local loglet
+/// when the configured provider is replicated (default in 1.4.0+). This migrates older nodes
+/// provisioned with default config from versions <1.4.0 to use the replicated loglet. Does not
+/// update logs, we leave it to Bifrost auto-improvement to create the new segments.
+async fn migrate_logs_configuration_to_replicated_if_needed(
+    nodes_config: &NodesConfiguration,
+    metadata: &Metadata,
+    metadata_writer: &MetadataWriter,
+    config: &Configuration,
+) -> Result<(), anyhow::Error> {
+    if nodes_config.len() != 1 {
+        // Bail if this is a multi-node cluster.
+        return Ok(());
+    }
+
+    if !config.has_role(Role::LogServer) {
+        // This means that roles were explicitly set; we can not migrate to replicated.
+        return Ok(());
+    }
+
+    let logs = metadata.logs_ref();
+    let logs_configuration = logs.configuration();
+
+    if matches!(config.bifrost.default_provider, ProviderKind::Replicated)
+        && matches!(
+            logs_configuration.default_provider.kind(),
+            ProviderKind::Local
+        )
+    {
+        info!("Migrating default loglet configuration to replicated");
+        let result = metadata_writer
+            .global_metadata()
+            .read_modify_write(|current: Option<Arc<Logs>>| {
+                let logs = current.expect("logs are initialized");
+                let mut builder = logs.as_ref().clone().into_builder();
+
+                // Why not ProviderConfiguration::from_configuration(config)? Using the default
+                // replicated loglet provider configuration is a safer alternative as there might be
+                // untested config changes that would fail later, while this is an appropriate
+                // successor to the pre-1.4.0 default local loglet config for single nodes. Anything
+                // more complex should be done as an explicit reconfiguration by the operator.
+                let logs_configuration = LogsConfiguration {
+                    default_provider: ProviderConfiguration::default(),
+                };
+                builder.set_configuration(logs_configuration);
+
+                let Some(logs) = builder.build_if_modified() else {
+                    return Err(anyhow::anyhow!("already up to date"));
+                };
+
+                Ok(logs)
+            })
+            .await;
+
+        match result {
+            Ok(_) => {}
+            Err(err) => {
+                warn!(
+                    "Failed to update the default loglet configuration in metadata: {}",
+                    err
+                );
+            }
+        }
+    }
+
+    Ok(())
+}

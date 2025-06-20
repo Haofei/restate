@@ -8,6 +8,8 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use std::sync::Arc;
+
 use crate::errors::InvocationError;
 use crate::identifiers::{InvocationId, PartitionProcessorRpcRequestId};
 use crate::invocation::{InvocationQuery, InvocationRequest, InvocationResponse, InvocationTarget};
@@ -63,6 +65,8 @@ pub enum InvocationOutputResponse {
     Failure(InvocationError),
 }
 
+// the most used variant is the largest one, so we are muting clippy intentionally.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum AttachInvocationResponse {
     NotFound,
@@ -71,6 +75,8 @@ pub enum AttachInvocationResponse {
     Ready(InvocationOutput),
 }
 
+// the most used variant is the largest one, so we are muting clippy intentionally.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum GetInvocationOutputResponse {
     NotFound,
@@ -81,20 +87,44 @@ pub enum GetInvocationOutputResponse {
     Ready(InvocationOutput),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CancelInvocationResponse {
+    /// The cancellation was processed immediately (e.g. for inboxed/scheduled invocations)
+    Done,
+    /// The cancel signal was appended
+    Appended,
+    NotFound,
+    AlreadyCompleted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KillInvocationResponse {
+    Ok,
+    NotFound,
+    AlreadyCompleted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PurgeInvocationResponse {
+    Ok,
+    NotFound,
+    NotCompleted,
+}
+
 /// This trait provides the functionalities to interact with Restate invocations.
 pub trait InvocationClient {
     /// Append the invocation to the log, waiting for the PP to emit [`SubmittedInvocationNotification`] when the command is processed.
     fn append_invocation_and_wait_submit_notification(
         &self,
         request_id: PartitionProcessorRpcRequestId,
-        invocation_request: InvocationRequest,
+        invocation_request: Arc<InvocationRequest>,
     ) -> impl Future<Output = Result<SubmittedInvocationNotification, InvocationClientError>> + Send;
 
     /// Append the invocation and wait for its output.
     fn append_invocation_and_wait_output(
         &self,
         request_id: PartitionProcessorRpcRequestId,
-        invocation_request: InvocationRequest,
+        invocation_request: Arc<InvocationRequest>,
     ) -> impl Future<Output = Result<InvocationOutput, InvocationClientError>> + Send;
 
     /// Attach to an existing invocation and wait for its output.
@@ -125,4 +155,32 @@ pub trait InvocationClient {
         invocation_id: InvocationId,
         signal: Signal,
     ) -> impl Future<Output = Result<(), InvocationClientError>> + Send;
+
+    /// Cancel the given invocation.
+    fn cancel_invocation(
+        &self,
+        request_id: PartitionProcessorRpcRequestId,
+        invocation_id: InvocationId,
+    ) -> impl Future<Output = Result<CancelInvocationResponse, InvocationClientError>> + Send;
+
+    /// Kill the given invocation.
+    fn kill_invocation(
+        &self,
+        request_id: PartitionProcessorRpcRequestId,
+        invocation_id: InvocationId,
+    ) -> impl Future<Output = Result<KillInvocationResponse, InvocationClientError>> + Send;
+
+    /// Purge the given invocation. This cleanups all the state for the given invocation. This command applies only to completed invocations.
+    fn purge_invocation(
+        &self,
+        request_id: PartitionProcessorRpcRequestId,
+        invocation_id: InvocationId,
+    ) -> impl Future<Output = Result<PurgeInvocationResponse, InvocationClientError>> + Send;
+
+    /// Purge the given invocation journal. This cleanups only the journal for the given invocation, retaining the metadata. This command applies only to completed invocations.
+    fn purge_journal(
+        &self,
+        request_id: PartitionProcessorRpcRequestId,
+        invocation_id: InvocationId,
+    ) -> impl Future<Output = Result<PurgeInvocationResponse, InvocationClientError>> + Send;
 }

@@ -55,8 +55,8 @@ indexmap = { workspace = true, features = ["serde"] }
 itertools = { workspace = true }
 metrics = { workspace = true }
 moka = { workspace = true, features = ["sync", "logging"] }
-notify = { version = "7.0.0" }
-notify-debouncer-full = { version = "0.4" }
+notify = { version = "8.0.0" }
+notify-debouncer-full = { version = "0.5" }
 num-traits = { workspace = true }
 opentelemetry = { workspace = true }
 parking_lot = { workspace = true }
@@ -68,10 +68,11 @@ rand = { workspace = true }
 regex = { workspace = true }
 regress = { workspace = true }
 schemars = { workspace = true, optional = true }
+semver = { workspace = true }
 serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 serde_path_to_error = { version = "0.1" }
-serde_with = { workspace = true }
+serde_with = { workspace = true, features = ["json"] }
 sha2 = { workspace = true }
 smallvec = { workspace = true }
 smartstring = { workspace = true, features = ["serde"]}
@@ -96,6 +97,7 @@ restate-types = {path = ".", default-features = false, features = ["test-util"]}
 restate-test-util = { workspace = true }
 
 criterion = { workspace = true, features = ["async_tokio"] }
+futures = { workspace = true }
 tempfile = { workspace = true }
 googletest = { workspace = true }
 rand = { workspace = true }

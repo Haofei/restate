@@ -76,10 +76,10 @@ use crate::{
     AddNodeError, CreatedAtMillis, JoinClusterError, JoinClusterHandle, JoinClusterReceiver,
     JoinClusterRequest, JoinClusterResponseSender, JoinError, KnownLeader, MemberId,
     MetadataCommand, MetadataCommandError, MetadataCommandReceiver, MetadataServer,
-    MetadataServerConfiguration, MetadataServerSummary, MetadataStoreRequest, ProvisionError,
-    ProvisionReceiver, RaftSummary, RemoveNodeError, RemoveNodeResponseSender, Request,
-    RequestError, RequestReceiver, SnapshotSummary, StatusSender, WriteRequest, local,
-    prepare_initial_nodes_configuration,
+    MetadataServerConfiguration, MetadataServerSummary, MetadataStoreRequest,
+    PreconditionViolation, ProvisionError, ProvisionReceiver, RaftSummary, RemoveNodeError,
+    RemoveNodeResponseSender, Request, RequestError, RequestReceiver, SnapshotSummary,
+    StatusSender, WriteRequest, local, prepare_initial_nodes_configuration,
 };
 
 const RAFT_INITIAL_LOG_TERM: u64 = 1;
@@ -614,6 +614,7 @@ impl MetadataServer for RaftMetadataServer {
 }
 
 /// States of a provisioned metadata store. The metadata store can be either a member or a stand by.
+#[allow(clippy::large_enum_variant)]
 enum Provisioned {
     /// Being an active member of the metadata store cluster
     Member(Member),
@@ -774,17 +775,7 @@ impl Member {
 
         loop {
             tokio::select! {
-                Ok(()) = nodes_config_watch.changed() => {
-                    let nodes_config = nodes_config.live_load();
-                    if self.should_leave(nodes_config) {
-                        break;
-                    }
-
-                    self.update_node_addresses(nodes_config);
-                },
-                _ = self.tick_interval.tick() => {
-                    self.raw_node.tick();
-                },
+                biased;
                 Some(raft) = self.raft_rx.recv() => {
                     if let Err(err) = self.raw_node.step(raft) {
                         match err {
@@ -797,6 +788,17 @@ impl Member {
                             err => Err(err)?
                         }
                     }
+                },
+                _ = self.tick_interval.tick() => {
+                    self.raw_node.tick();
+                },
+                Ok(()) = nodes_config_watch.changed() => {
+                    let nodes_config = nodes_config.live_load();
+                    if self.should_leave(nodes_config) {
+                        break;
+                    }
+
+                    self.update_node_addresses(nodes_config);
                 },
                 Some(request) = self.request_rx.recv() => {
                     self.handle_request(request, nodes_config.live_load());
@@ -957,6 +959,46 @@ impl Member {
                 }
             }
             Request::Write { request, callback } => {
+                match request.precondition() {
+                    Precondition::MatchesVersion(expected_version) => {
+                        // Important assumption: The version per key is monotonically increasing.
+                        // It will never be deleted and reset to a lower value than before!
+                        //
+                        // The worst thing that can happen if this assumption does not hold is that
+                        // we are wrongly rejecting a write which should be retried by the caller
+                        // anyway.
+                        if let Some(actual_version) = self.kv_storage.get_version(request.key()) {
+                            if actual_version > expected_version {
+                                callback.fail(RequestError::FailedPrecondition(
+                                    PreconditionViolation::VersionMismatch {
+                                        expected: expected_version,
+                                        actual: Some(actual_version),
+                                    },
+                                ));
+                                return;
+                            }
+                        }
+                    }
+                    Precondition::DoesNotExist => {
+                        // Important assumption: The version per key is monotonically increasing.
+                        // It will never be deleted. Otherwise, we can't be sure that an existing key
+                        // won't be deleted until this request is processed.
+                        //
+                        // The worst thing that can happen if this assumption does not hold is that
+                        // we are wrongly rejecting a write which should be retried by the caller
+                        // anyway.
+                        if self.kv_storage.contains(request.key()) {
+                            callback.fail(RequestError::FailedPrecondition(
+                                PreconditionViolation::Exists,
+                            ));
+                            return;
+                        }
+                    }
+                    Precondition::None => {
+                        // nothing to do
+                    }
+                }
+
                 if let Err(err) = request
                     .encode_to_vec()
                     .map_err(Into::into)
@@ -2086,7 +2128,7 @@ impl Standby {
                 .unwrap_or(Metadata::with_current(|m| m.nodes_config_version()))),
             Err(status) => {
                 let known_leader = KnownLeader::from_status(&status);
-                Err(JoinError::Rpc(status, known_leader))
+                Err(JoinError::Rpc(Box::new(status), known_leader))
             }
         }
     }

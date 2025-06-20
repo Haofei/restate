@@ -24,7 +24,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio_util::io::StreamReader;
-use tracing::{debug, info, instrument, warn};
+use tracing::{Instrument, Span, debug, info, instrument, warn};
 use url::Url;
 
 use restate_object_store_util::create_object_store_client;
@@ -34,6 +34,7 @@ use restate_partition_store::snapshots::{
 use restate_types::config::SnapshotsOptions;
 use restate_types::identifiers::{PartitionId, SnapshotId};
 use restate_types::logs::{Lsn, SequenceNumber};
+use restate_types::nodes_config::ClusterFingerprint;
 
 /// Provides read and write access to the long-term partition snapshot storage destination.
 ///
@@ -77,6 +78,10 @@ pub struct LatestSnapshot {
     /// Restate cluster name which produced the snapshot.
     pub cluster_name: String,
 
+    /// a unique fingerprint for this cluster.
+    #[serde(default)]
+    pub cluster_fingerprint: Option<ClusterFingerprint>,
+
     /// Node that produced this snapshot.
     pub node_name: String,
 
@@ -100,10 +105,11 @@ impl LatestSnapshot {
         LatestSnapshot {
             version: snapshot.version,
             cluster_name: snapshot.cluster_name.clone(),
+            cluster_fingerprint: snapshot.cluster_fingerprint,
             node_name: snapshot.node_name.clone(),
             partition_id: snapshot.partition_id,
             snapshot_id: snapshot.snapshot_id,
-            created_at: snapshot.created_at.clone(),
+            created_at: snapshot.created_at,
             min_applied_lsn: snapshot.min_applied_lsn,
             path: UniqueSnapshotKey::from_metadata(snapshot).padded_key(),
         }
@@ -171,13 +177,10 @@ impl SnapshotRepository {
 
     /// Write a partition snapshot to the snapshot repository.
     #[instrument(
-        level = "debug",
-        skip_all,
+        level = "error",
         err,
-        fields(
-            snapshot_id = ?snapshot.snapshot_id,
-            partition_id = ?snapshot.partition_id,
-        )
+        skip_all,
+        fields(local_path = %local_snapshot_path.display())
     )]
     pub(crate) async fn put(
         &self,
@@ -244,11 +247,7 @@ impl SnapshotRepository {
             .await
             .map_err(|e| PutSnapshotError::from(e, progress.clone()))?;
 
-            debug!(
-                etag = put_result.e_tag.unwrap_or_default(),
-                ?key,
-                "Put snapshot data file completed",
-            );
+            debug!(etag = put_result.e_tag.unwrap_or_default(), %key, "Put snapshot object completed");
             progress.push(file.name.clone());
         }
 
@@ -266,7 +265,7 @@ impl SnapshotRepository {
 
         debug!(
             etag = put_result.e_tag.unwrap_or_default(),
-            key = ?metadata_key,
+            key = %metadata_key,
             "Successfully published snapshot metadata",
         );
 
@@ -328,10 +327,11 @@ impl SnapshotRepository {
     /// Discover and download the latest snapshot available. It is the caller's responsibility
     /// to delete the snapshot directory when it is no longer needed.
     #[instrument(
-        level = "debug",
+        name = "get-latest-snapshot",
+        level = "error",
         skip_all,
         err,
-        fields(%partition_id),
+        fields(%partition_id, snapshot_id = tracing::field::Empty),
     )]
     pub(crate) async fn get_latest(
         &self,
@@ -349,7 +349,8 @@ impl SnapshotRepository {
         };
 
         let latest: LatestSnapshot = serde_json::from_slice(&latest.bytes().await?)?;
-        debug!("Latest snapshot metadata: {:?}", latest);
+        tracing::Span::current().record("snapshot_id", tracing::field::display(latest.snapshot_id));
+        debug!("Latest snapshot metadata: {latest:?}");
 
         let snapshot_metadata_path = self
             .prefix
@@ -380,8 +381,9 @@ impl SnapshotRepository {
         if snapshot_metadata.cluster_name != self.cluster_name {
             // todo(pavel): revisit whether we shouldn't just panic at this point - this is a bad sign!
             warn!(
-                "Snapshot does not match the cluster name of latest snapshot at destination in snapshot id {}! Expected: cluster name=\"{}\", found: \"{}\"",
-                snapshot_metadata.snapshot_id, self.cluster_name, snapshot_metadata.cluster_name
+                "Snapshot cluster name does not match node configuration! \
+                Expected: \"{}\", found: \"{}\"",
+                self.cluster_name, snapshot_metadata.cluster_name
             );
             return Ok(None); // perhaps this needs to be a configuration error
         }
@@ -396,11 +398,7 @@ impl SnapshotRepository {
             format!("{}-", snapshot_metadata.snapshot_id),
             &self.staging_dir,
         )?;
-        debug!(
-            snapshot_id = %snapshot_metadata.snapshot_id,
-            path = %snapshot_dir.path().display(),
-            "Getting snapshot data files",
-        );
+        debug!(path = %snapshot_dir.path().display(), "Downloading snapshot");
 
         let directory = snapshot_dir.path().to_string_lossy().to_string();
         let concurrency_limiter = Arc::new(Semaphore::new(DOWNLOAD_CONCURRENCY_LIMIT));
@@ -414,41 +412,43 @@ impl SnapshotRepository {
                 .child(partition_id.to_string())
                 .child(latest.path.as_str())
                 .child(filename);
-            let file_path = snapshot_dir.path().join(filename);
+            let local_path = snapshot_dir.path().join(filename);
             let concurrency_limiter = Arc::clone(&concurrency_limiter);
             let object_store = Arc::clone(&self.object_store);
+            let snapshot_id = snapshot_metadata.snapshot_id;
+            let snapshot_filename = filename.to_owned();
 
             let handle = downloads.build_task().name(filename).spawn(async move {
                 let _permit = concurrency_limiter.acquire().await?;
-                debug!(%key, "Downloading snapshot file");
+                debug!(%key, "Downloading snapshot object");
                 let mut file_data = StreamReader::new(
                     object_store
                         .get(&key)
                         .await
-                        .map_err(|e| anyhow!("Failed to download snapshot file {:?}: {}", key, e))?
+                        .map_err(|e| anyhow!("Failed to download partition {partition_id} snapshot {snapshot_id} file {key:?}: {e}"))?
                         .into_stream(),
                 );
 
                 let mut snapshot_file =
-                    tokio::fs::File::create_new(&file_path).await.map_err(|e| {
-                        anyhow!("Failed to create snapshot file {:?}: {}", file_path, e)
+                    tokio::fs::File::create_new(&local_path).await.map_err(|e| {
+                        anyhow!("Failed to create local partition {partition_id} snapshot file {local_path:?}: {e}")
                     })?;
                 let size = io::copy(&mut file_data, &mut snapshot_file)
                     .await
-                    .map_err(|e| anyhow!("Failed to download snapshot file {:?}: {}", key, e))?;
+                    .map_err(|e| anyhow!("Failed to download snapshot object {:?}: {}", key, e))?;
                 snapshot_file.shutdown().await?;
 
                 if size != expected_size as u64 {
-                    return Err(anyhow!(
-                        "Downloaded snapshot file {:?} has unexpected size: expected {}, got {}",
-                        key,
-                        expected_size,
-                        size
-                    ));
+                    return Err(anyhow!("Downloaded partition {partition_id} snapshot {snapshot_id} component file {:?} has unexpected size: expected: {}, actual: {}", snapshot_filename, expected_size, size));
                 }
-                debug!(%key, ?size, "Downloaded snapshot data file to {:?}", file_path);
+                debug!(
+                    %key,
+                    ?size,
+                    "Downloaded snapshot object {}",
+                    local_path.display(),
+                );
                 anyhow::Ok(())
-            })?;
+            }.instrument(Span::current()))?;
             task_handles.insert(handle.id(), filename.to_string());
             // patch the directory path to reflect the actual location on the restoring node
             file.directory = directory.clone();
@@ -457,15 +457,15 @@ impl SnapshotRepository {
         loop {
             match downloads.join_next().await {
                 None => {
-                    debug!("All download tasks completed");
+                    debug!(snapshot_id = %snapshot_metadata.snapshot_id, "All download tasks completed");
                     break;
                 }
                 Some(Err(join_error)) => {
-                    let failed = task_handles.get(&join_error.id());
+                    let failed_id = task_handles.get(&join_error.id());
                     abort_tasks(downloads).await;
                     return Err(anyhow!(
-                        "Failed to download snapshot file {:?}: {}",
-                        failed,
+                        "Failed to download snapshot object {:?}: {}",
+                        failed_id,
                         join_error
                     ));
                 }
@@ -483,8 +483,8 @@ impl SnapshotRepository {
             "Downloaded partition snapshot",
         );
         Ok(Some(LocalPartitionSnapshot {
-            base_dir: snapshot_dir.into_path(),
-            log_id: snapshot_metadata.get_log_id(),
+            base_dir: snapshot_dir.keep(),
+            log_id: snapshot_metadata.log_id,
             min_applied_lsn: snapshot_metadata.min_applied_lsn,
             db_comparator_name: snapshot_metadata.db_comparator_name,
             files: snapshot_metadata.files,
@@ -494,12 +494,6 @@ impl SnapshotRepository {
 
     /// Retrieve the latest known LSN to be archived to the snapshot repository.
     /// Response of `Ok(Lsn::INVALID)` indicates no existing snapshot for the partition.
-    #[instrument(
-        level = "debug",
-        skip_all,
-        err,
-        fields(%partition_id),
-    )]
     pub(crate) async fn get_latest_archived_lsn(
         &self,
         partition_id: PartitionId,
@@ -516,7 +510,7 @@ impl SnapshotRepository {
         };
 
         let latest: LatestSnapshot = serde_json::from_slice(&latest.bytes().await?)?;
-        debug!("Latest snapshot metadata: {:?}", latest);
+        debug!(partition_id = %partition_id, snapshot_id = %latest.snapshot_id, "Latest snapshot metadata: {:?}", latest);
 
         Ok(latest.min_applied_lsn)
     }
@@ -551,6 +545,16 @@ impl SnapshotRepository {
                         "Snapshot does not match the cluster name of latest snapshot at destination!"
                     );
                 }
+                // The check is disabled until we pass the point where fingerprints are enforced.
+                //
+                // If this check is turned on, nodes will not be able to migrate from "no
+                // fingerprint" to "fingerprint" being set.
+                // It's estimated that this will happen in v1.5.0
+                // if snapshot.cluster_fingerprint != latest.cluster_fingerprint {
+                //     bail!(
+                //         "Snapshot does not match the cluster fingerprint of latest snapshot at destination!"
+                //     );
+                // }
                 Ok(Some((latest, version)))
             }
             Err(object_store::Error::NotFound { .. }) => {
@@ -750,7 +754,7 @@ mod tests {
         };
         let repository = SnapshotRepository::create_if_configured(
             &opts,
-            TempDir::new().unwrap().into_path(),
+            TempDir::new().unwrap().keep(),
             "cluster".to_owned(),
         )
         .await?
@@ -837,7 +841,7 @@ mod tests {
 
         let repository = SnapshotRepository::create_if_configured(
             &opts,
-            TempDir::new().unwrap().into_path(),
+            TempDir::new().unwrap().keep(),
             "cluster".to_owned(),
         )
         .await?
@@ -914,12 +918,13 @@ mod tests {
         PartitionSnapshotMetadata {
             version: SnapshotFormatVersion::V1,
             cluster_name: "cluster".to_string(),
+            cluster_fingerprint: None,
             node_name: "node".to_string(),
             partition_id: PartitionId::MIN,
             created_at: humantime::Timestamp::from(SystemTime::now()),
             snapshot_id: SnapshotId::new(),
             key_range: PartitionKey::MIN..=PartitionKey::MAX,
-            log_id: Some(LogId::from(PartitionId::MIN)),
+            log_id: LogId::MIN,
             min_applied_lsn: Lsn::new(1),
             db_comparator_name: "leveldb.BytewiseComparator".to_string(),
             // this is totally bogus, but it doesn't matter since we won't be importing it into RocksDB

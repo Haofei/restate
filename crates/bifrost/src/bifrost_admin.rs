@@ -13,12 +13,10 @@ use std::sync::Arc;
 use tracing::{debug, instrument, warn};
 
 use restate_core::{Metadata, MetadataKind};
-use restate_metadata_store::retry_on_retryable_error;
 use restate_types::Version;
 use restate_types::config::Configuration;
 use restate_types::logs::metadata::{Chain, LogletParams, Logs, ProviderKind, SegmentIndex};
 use restate_types::logs::{LogId, Lsn, TailState};
-use restate_types::metadata_store::keys::BIFROST_CONFIG_KEY;
 
 use crate::bifrost::BifrostInner;
 use crate::error::AdminError;
@@ -235,29 +233,8 @@ impl<'a> BifrostAdmin<'a> {
     ) -> Result<()> {
         self.inner.fail_if_shutting_down()?;
         self.inner
-            .metadata_writer
-            .global_metadata()
-            .read_modify_write(|logs: Option<Arc<Logs>>| {
-                let logs = logs.ok_or(Error::UnknownLogId(log_id))?;
-
-                let mut builder = logs.as_ref().clone().into_builder();
-                let mut chain_builder = builder.chain(log_id).ok_or(Error::UnknownLogId(log_id))?;
-
-                if chain_builder.tail().index() != last_segment_index {
-                    // tail is not what we expected.
-                    return Err(Error::from(AdminError::SegmentMismatch {
-                        expected: last_segment_index,
-                        found: chain_builder.tail().index(),
-                    }));
-                }
-
-                let _ = chain_builder
-                    .append_segment(base_lsn, provider, params.clone())
-                    .map_err(AdminError::from)?;
-                Ok(builder.build())
-            })
-            .await
-            .map_err(|e| e.transpose())?;
+            .extend_log_chain(log_id, last_segment_index, base_lsn, provider, params)
+            .await?;
 
         Ok(())
     }
@@ -295,29 +272,5 @@ impl<'a> BifrostAdmin<'a> {
             Err(Error::AdminError(AdminError::LogAlreadyExists(_))) => Ok(()),
             Err(other) => Err(other),
         }
-    }
-
-    /// Creates empty metadata if none exists for bifrost and publishes it to metadata
-    /// manager.
-    pub async fn init_metadata(&self) -> Result<(), Error> {
-        let retry_policy = Configuration::pinned()
-            .common
-            .network_error_retry_policy
-            .clone();
-
-        let logs = retry_on_retryable_error(retry_policy, || {
-            self.inner
-                .metadata_writer
-                .raw_metadata_store_client()
-                .get_or_insert(BIFROST_CONFIG_KEY.clone(), || {
-                    debug!("Attempting to initialize logs metadata in metadata store");
-                    Logs::from_configuration(&Configuration::pinned())
-                })
-        })
-        .await
-        .map_err(|err| err.into_inner())?;
-
-        self.inner.metadata_writer.update(Arc::new(logs)).await?;
-        Ok(())
     }
 }

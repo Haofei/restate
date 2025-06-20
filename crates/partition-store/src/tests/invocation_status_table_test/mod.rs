@@ -17,14 +17,13 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use bytestring::ByteString;
-use futures_util::TryStreamExt;
-use googletest::prelude::*;
 
 use restate_storage_api::Transaction;
 use restate_storage_api::invocation_status_table::{
     CompletionRangeEpochMap, InFlightInvocationMetadata, InvocationStatus, InvocationStatusTable,
-    InvokedInvocationStatusLite, JournalMetadata, ReadOnlyInvocationStatusTable, StatusTimestamps,
+    JournalMetadata, ReadOnlyInvocationStatusTable, StatusTimestamps,
 };
+use restate_types::RestateVersion;
 use restate_types::identifiers::{InvocationId, PartitionProcessorRpcRequestId, WithPartitionKey};
 use restate_types::invocation::{
     InvocationTarget, ServiceInvocationSpanContext, Source, VirtualObjectHandlerType,
@@ -79,10 +78,18 @@ static RPC_REQUEST_ID: LazyLock<PartitionProcessorRpcRequestId> =
 fn invoked_status(invocation_target: InvocationTarget) -> InvocationStatus {
     InvocationStatus::Invoked(InFlightInvocationMetadata {
         invocation_target,
+        created_using_restate_version: RestateVersion::current(),
         journal_metadata: JournalMetadata::initialize(ServiceInvocationSpanContext::empty()),
         pinned_deployment: None,
         response_sinks: HashSet::new(),
-        timestamps: StatusTimestamps::init(MillisSinceEpoch::new(0)),
+        timestamps: StatusTimestamps::new(
+            MillisSinceEpoch::new(0),
+            MillisSinceEpoch::new(0),
+            None,
+            None,
+            None,
+            None,
+        ),
         source: Source::Ingress(*RPC_REQUEST_ID),
         execution_time: None,
         completion_retention_duration: Duration::ZERO,
@@ -98,10 +105,18 @@ fn suspended_status(invocation_target: InvocationTarget) -> InvocationStatus {
     InvocationStatus::Suspended {
         metadata: InFlightInvocationMetadata {
             invocation_target,
+            created_using_restate_version: RestateVersion::current(),
             journal_metadata: JournalMetadata::initialize(ServiceInvocationSpanContext::empty()),
             pinned_deployment: None,
             response_sinks: HashSet::new(),
-            timestamps: StatusTimestamps::init(MillisSinceEpoch::new(0)),
+            timestamps: StatusTimestamps::new(
+                MillisSinceEpoch::new(0),
+                MillisSinceEpoch::new(0),
+                None,
+                None,
+                None,
+                None,
+            ),
             source: Source::Ingress(*RPC_REQUEST_ID),
             execution_time: None,
             completion_retention_duration: Duration::ZERO,
@@ -154,30 +169,6 @@ async fn verify_point_lookups<T: InvocationStatusTable>(txn: &mut T) {
     );
 }
 
-async fn verify_all_svc_with_status_invoked<T: InvocationStatusTable>(txn: &mut T) {
-    let actual = txn
-        .all_invoked_invocations()
-        .unwrap()
-        .try_collect::<Vec<_>>()
-        .await
-        .unwrap();
-    assert_that!(
-        actual,
-        unordered_elements_are![
-            eq(InvokedInvocationStatusLite {
-                invocation_id: *INVOCATION_ID_1,
-                invocation_target: INVOCATION_TARGET_1.clone(),
-                current_invocation_epoch: 1,
-            }),
-            eq(InvokedInvocationStatusLite {
-                invocation_id: *INVOCATION_ID_2,
-                invocation_target: INVOCATION_TARGET_2.clone(),
-                current_invocation_epoch: 1,
-            })
-        ]
-    );
-}
-
 #[restate_core::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_invocation_status() {
     let mut rocksdb = storage_test_environment().await;
@@ -185,7 +176,18 @@ async fn test_invocation_status() {
     populate_data(&mut txn).await;
 
     verify_point_lookups(&mut txn).await;
-    verify_all_svc_with_status_invoked(&mut txn).await;
+    assert_eq!(
+        txn.get_invocation_status(&INVOCATION_ID_1)
+            .await
+            .expect("should not fail"),
+        invoked_status(INVOCATION_TARGET_1.clone())
+    );
+    assert_eq!(
+        txn.get_invocation_status(&INVOCATION_ID_2)
+            .await
+            .expect("should not fail"),
+        invoked_status(INVOCATION_TARGET_2.clone())
+    );
 }
 
 #[restate_core::test(flavor = "multi_thread", worker_threads = 2)]
@@ -193,7 +195,12 @@ async fn test_migration() {
     let mut rocksdb = storage_test_environment().await;
 
     let invocation_id = InvocationId::mock_random();
-    let status = InvocationStatus::Invoked(InFlightInvocationMetadata::mock());
+    let in_flight_invocation_status = InFlightInvocationMetadata {
+        // Old data structure doesn't support created_using_restate_version
+        created_using_restate_version: RestateVersion::unknown(),
+        ..InFlightInvocationMetadata::mock()
+    };
+    let status = InvocationStatus::Invoked(in_flight_invocation_status);
 
     // Let's mock the old invocation status
     let mut txn = rocksdb.transaction();

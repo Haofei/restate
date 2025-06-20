@@ -8,13 +8,14 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
 use bytes::{Bytes, BytesMut};
 use bytestring::ByteString;
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use pprof::criterion::{Output, PProfProfiler};
 use pprof::flamegraph::Options;
 use prost::Message as _;
@@ -26,7 +27,6 @@ use restate_core::network::protobuf::network::message::Body;
 use restate_core::network::protobuf::network::{Datagram, Message, datagram};
 use restate_invoker_api::{Effect, EffectKind};
 use restate_storage_api::deduplication_table::{DedupInformation, EpochSequenceNumber, ProducerId};
-use restate_types::GenerationalNodeId;
 use restate_types::identifiers::{InvocationId, LeaderEpoch, PartitionProcessorRpcRequestId};
 use restate_types::invocation::{
     InvocationTarget, ServiceInvocation, ServiceInvocationSpanContext,
@@ -39,6 +39,7 @@ use restate_types::net::log_server::{LogServerRequestHeader, Store, StoreFlags};
 use restate_types::net::replicated_loglet::{Append, CommonRequestHeader};
 use restate_types::net::{RpcRequest, Service};
 use restate_types::time::MillisSinceEpoch;
+use restate_types::{GenerationalNodeId, RestateVersion};
 use restate_wal_protocol::{Command, Destination, Envelope};
 
 #[cfg(not(target_env = "msvc"))]
@@ -69,7 +70,7 @@ fn invoke_cmd() -> Command {
     let inv_source = restate_types::invocation::Source::Ingress(request_id);
     let handler: ByteString = format!("aFunction_{}", rand_string(10)).into();
 
-    Command::Invoke(ServiceInvocation {
+    Command::Invoke(Box::new(ServiceInvocation {
         invocation_id: InvocationId::generate(
             &InvocationTarget::service("MyWonderfulService", handler.clone()),
             Some(&idempotency_key),
@@ -95,7 +96,8 @@ fn invoke_cmd() -> Command {
         submit_notification_sink: Some(
             restate_types::invocation::SubmitNotificationSink::Ingress { request_id },
         ),
-    })
+        restate_version: RestateVersion::current(),
+    }))
 }
 
 fn invoker_effect_cmd() -> Command {
@@ -105,7 +107,7 @@ fn invoker_effect_cmd() -> Command {
     let mut data = [0u8; 128];
     rand::rng().fill_bytes(&mut data);
 
-    Command::InvokerEffect(Effect {
+    Command::InvokerEffect(Box::new(Effect {
         invocation_id: InvocationId::generate(
             &InvocationTarget::service("MyWonderfulService", handler.clone()),
             Some(&idempotency_key),
@@ -121,7 +123,7 @@ fn invoker_effect_cmd() -> Command {
             ),
             command_index_to_ack: Some(random()),
         },
-    })
+    }))
 }
 
 pub fn generate_envelope<G>(generator: G) -> Arc<Envelope>
@@ -204,7 +206,7 @@ fn serialize_append_message(payloads: Arc<[Record]>) -> anyhow::Result<Message> 
             segment_index: 2.into(),
             loglet_id: LogletId::new(12u16.into(), 4.into()),
         },
-        payloads,
+        payloads: payloads.into(),
     };
 
     let body = Body::Datagram(Datagram {

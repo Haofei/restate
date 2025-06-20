@@ -24,6 +24,7 @@ use restate_types::live::BoxLiveLoad;
 use restate_types::logs::metadata::ProviderKind;
 
 use crate::bifrost::BifrostInner;
+use crate::log_chain_extender::LogChainExtender;
 #[cfg(any(test, feature = "memory-loglet"))]
 use crate::providers::memory_loglet;
 use crate::watchdog::{Watchdog, WatchdogCommand};
@@ -33,19 +34,27 @@ pub struct BifrostService {
     inner: Arc<BifrostInner>,
     bifrost: Bifrost,
     watchdog: Watchdog,
+    log_chain_extender: LogChainExtender,
     factories: HashMap<ProviderKind, Box<dyn LogletProviderFactory>>,
 }
 
 impl BifrostService {
     pub fn new(metadata_writer: MetadataWriter) -> Self {
         let (watchdog_sender, watchdog_receiver) = tokio::sync::mpsc::unbounded_channel();
-        let inner = Arc::new(BifrostInner::new(watchdog_sender.clone(), metadata_writer));
+        let (extend_log_chain_tx, extend_log_chain_rx) = tokio::sync::mpsc::unbounded_channel();
+        let inner = Arc::new(BifrostInner::new(
+            watchdog_sender.clone(),
+            extend_log_chain_tx,
+            metadata_writer,
+        ));
         let bifrost = Bifrost::new(inner.clone());
         let watchdog = Watchdog::new(inner.clone(), watchdog_sender, watchdog_receiver);
+        let log_chain_extender = LogChainExtender::new(inner.clone(), extend_log_chain_rx);
         Self {
             inner,
             bifrost,
             watchdog,
+            log_chain_extender,
             factories: HashMap::new(),
         }
     }
@@ -77,17 +86,9 @@ impl BifrostService {
     /// before continuing. For instance, a worker mark itself as `STARTING_UP` and not accept any
     /// requests until this is completed.
     ///
-    /// This requires to run within a task_center context.
+    /// This requires to run within a task_center context. Expects that logs metadata is synced.
     pub async fn start(self) -> anyhow::Result<()> {
-        // Make sure we have v1 metadata written to metadata store with the default
-        // configuration. If metadata is already initialized, this will make sure we have the
-        // latest version set in metadata manager.
-
-        // todo we seem to have a race condition between this call and the provision step which might
-        //  write a different logs configuration
-        self.bifrost.admin().init_metadata().await?;
-
-        // initialize all enabled providers.
+        // Initialize enabled providers.
         if self.factories.is_empty() {
             anyhow::bail!("No loglet providers enabled!");
         }
@@ -162,6 +163,12 @@ impl BifrostService {
             TaskKind::BifrostWatchdog,
             "bifrost-watchdog",
             self.watchdog.run(),
+        )?;
+
+        TaskCenter::spawn(
+            TaskKind::BifrostBackgroundHighPriority,
+            "log-chain-extender",
+            self.log_chain_extender.run(),
         )?;
 
         // Bifrost started!

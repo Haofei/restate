@@ -19,9 +19,7 @@ use tracing::{debug, instrument, warn};
 
 use restate_bifrost::Bifrost;
 use restate_core::{Metadata, cancellation_watcher};
-use restate_storage_api::invocation_status_table::{
-    InvocationStatus, ReadOnlyInvocationStatusTable,
-};
+use restate_storage_api::invocation_status_table::{InvocationStatus, ScanInvocationStatusTable};
 use restate_types::identifiers::WithPartitionKey;
 use restate_types::identifiers::{LeaderEpoch, PartitionId, PartitionKey};
 use restate_types::invocation::PurgeInvocationRequest;
@@ -38,7 +36,7 @@ pub(super) struct Cleaner<Storage> {
 
 impl<Storage> Cleaner<Storage>
 where
-    Storage: ReadOnlyInvocationStatusTable + Send + Sync + 'static,
+    Storage: ScanInvocationStatusTable + Send + Sync + 'static,
 {
     pub(super) fn new(
         partition_id: PartitionId,
@@ -108,7 +106,7 @@ where
     ) -> anyhow::Result<()> {
         debug!("Executing completed invocations cleanup");
 
-        let invocations_stream = storage.all_invocation_statuses(partition_key_range)?;
+        let invocations_stream = storage.scan_invocation_statuses(partition_key_range)?;
         tokio::pin!(invocations_stream);
 
         while let Some((invocation_id, invocation_status)) = invocations_stream
@@ -130,31 +128,32 @@ where
                 //  thus it will be cleaned up with the old timer.
                 continue;
             };
-            let Some(status_expiration_time) = SystemTime::from(completed_time)
-                .checked_add(completed_invocation.completion_retention_duration)
-            else {
-                // If sum overflow, then the cleanup time lies far enough in the future
-                continue;
-            };
 
             let now = SystemTime::now();
-            if now >= status_expiration_time {
-                restate_bifrost::append_to_bifrost(
-                    bifrost,
-                    Arc::new(Envelope {
-                        header: Header {
-                            source: bifrost_envelope_source.clone(),
-                            dest: Destination::Processor {
-                                partition_key: invocation_id.partition_key(),
-                                dedup: None,
+            if let Some(status_expiration_time) = SystemTime::from(completed_time)
+                .checked_add(completed_invocation.completion_retention_duration)
+            {
+                if now >= status_expiration_time {
+                    restate_bifrost::append_to_bifrost(
+                        bifrost,
+                        Arc::new(Envelope {
+                            header: Header {
+                                source: bifrost_envelope_source.clone(),
+                                dest: Destination::Processor {
+                                    partition_key: invocation_id.partition_key(),
+                                    dedup: None,
+                                },
                             },
-                        },
-                        command: Command::PurgeInvocation(PurgeInvocationRequest { invocation_id }),
-                    }),
-                )
-                .await
-                .context("Cannot append to bifrost purge invocation")?;
-                continue;
+                            command: Command::PurgeInvocation(PurgeInvocationRequest {
+                                invocation_id,
+                                response_sink: None,
+                            }),
+                        }),
+                    )
+                    .await
+                    .context("Cannot append to bifrost purge invocation")?;
+                    continue;
+                }
             }
 
             // We don't cleanup the status yet, let's check if there's a journal to cleanup
@@ -181,6 +180,7 @@ where
                             },
                             command: Command::PurgeJournal(PurgeInvocationRequest {
                                 invocation_id,
+                                response_sink: None,
                             }),
                         }),
                     )
@@ -205,39 +205,18 @@ mod tests {
     use restate_storage_api::StorageError;
     use restate_storage_api::invocation_status_table::{
         CompletedInvocation, InFlightInvocationMetadata, InvocationStatus,
-        InvokedInvocationStatusLite,
+        InvokedInvocationStatusLite, JournalMetadata, ScanInvocationStatusTable,
     };
     use restate_types::Version;
     use restate_types::identifiers::{InvocationId, InvocationUuid};
     use restate_types::partition_table::{FindPartition, PartitionTable};
-    use std::future::Future;
     use test_log::test;
 
     #[allow(dead_code)]
     struct MockInvocationStatusReader(Vec<(InvocationId, InvocationStatus)>);
 
-    impl ReadOnlyInvocationStatusTable for MockInvocationStatusReader {
-        fn get_invocation_status(
-            &mut self,
-            _: &InvocationId,
-        ) -> impl Future<Output = restate_storage_api::Result<InvocationStatus>> + Send {
-            todo!();
-            #[allow(unreachable_code)]
-            std::future::pending()
-        }
-
-        fn all_invoked_invocations(
-            &mut self,
-        ) -> std::result::Result<
-            impl Stream<Item = restate_storage_api::Result<InvokedInvocationStatusLite>> + Send,
-            StorageError,
-        > {
-            todo!();
-            #[allow(unreachable_code)]
-            Ok(stream::empty())
-        }
-
-        fn all_invocation_statuses(
+    impl ScanInvocationStatusTable for MockInvocationStatusReader {
+        fn scan_invocation_statuses(
             &self,
             _: RangeInclusive<PartitionKey>,
         ) -> std::result::Result<
@@ -245,6 +224,14 @@ mod tests {
             StorageError,
         > {
             Ok(stream::iter(self.0.clone()).map(Ok))
+        }
+
+        fn scan_invoked_invocations(
+            &self,
+        ) -> restate_storage_api::Result<
+            impl Stream<Item = restate_storage_api::Result<InvokedInvocationStatusLite>> + Send,
+        > {
+            Ok(stream::empty())
         }
     }
 
@@ -262,6 +249,8 @@ mod tests {
 
         let expired_invocation =
             InvocationId::from_parts(PartitionKey::MIN, InvocationUuid::mock_random());
+        let expired_journal =
+            InvocationId::from_parts(PartitionKey::MIN, InvocationUuid::mock_random());
         let not_expired_invocation_1 =
             InvocationId::from_parts(PartitionKey::MIN, InvocationUuid::mock_random());
         let not_expired_invocation_2 =
@@ -274,6 +263,19 @@ mod tests {
                 expired_invocation,
                 InvocationStatus::Completed(CompletedInvocation {
                     completion_retention_duration: Duration::ZERO,
+                    ..CompletedInvocation::mock_neo()
+                }),
+            ),
+            (
+                expired_journal,
+                InvocationStatus::Completed(CompletedInvocation {
+                    completion_retention_duration: Duration::MAX,
+                    journal_retention_duration: Duration::ZERO,
+                    journal_metadata: JournalMetadata {
+                        length: 2,
+                        commands: 2,
+                        span_context: Default::default(),
+                    },
                     ..CompletedInvocation::mock_neo()
                 }),
             ),
@@ -320,19 +322,27 @@ mod tests {
         })
         .unwrap();
 
-        let mut log_entries = bifrost.read_all(partition_id.into()).await.unwrap();
-        let bifrost_message = log_entries
-            .remove(0)
-            .try_decode::<Envelope>()
+        let log_entries: Vec<_> = bifrost
+            .read_all(partition_id.into())
+            .await
             .unwrap()
-            .unwrap();
+            .into_iter()
+            .map(|e| e.try_decode::<Envelope>().unwrap().unwrap().command)
+            .collect();
 
         assert_that!(
-            bifrost_message.command,
-            pat!(Command::PurgeInvocation(pat!(PurgeInvocationRequest {
-                invocation_id: eq(expired_invocation)
-            })))
+            log_entries,
+            all!(
+                len(eq(2)),
+                contains(pat!(Command::PurgeInvocation(pat!(
+                    PurgeInvocationRequest {
+                        invocation_id: eq(expired_invocation),
+                    }
+                )))),
+                contains(pat!(Command::PurgeJournal(pat!(PurgeInvocationRequest {
+                    invocation_id: eq(expired_journal),
+                })))),
+            )
         );
-        assert_that!(log_entries, empty());
     }
 }

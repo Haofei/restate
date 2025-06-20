@@ -9,7 +9,7 @@
 // by the Apache License, Version 2.0.
 
 use crate::Result;
-use futures_util::Stream;
+use futures::Stream;
 use restate_types::identifiers::{InvocationId, InvocationUuid, PartitionKey, WithPartitionKey};
 use restate_types::invocation::{InvocationEpoch, ServiceInvocation};
 use restate_types::time::MillisSinceEpoch;
@@ -178,7 +178,7 @@ impl restate_types::timer::TimerKey for TimerKey {
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Timer {
     // TODO remove this variant when removing the old invocation status table
-    Invoke(ServiceInvocation),
+    Invoke(Box<ServiceInvocation>),
     CompleteJournalEntry(
         InvocationId,
         u32,
@@ -206,7 +206,7 @@ impl Timer {
         )
     }
 
-    pub fn invoke(timestamp: u64, service_invocation: ServiceInvocation) -> (TimerKey, Self) {
+    pub fn invoke(timestamp: u64, service_invocation: Box<ServiceInvocation>) -> (TimerKey, Self) {
         (
             TimerKey::invoke(
                 timestamp,

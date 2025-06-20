@@ -118,21 +118,6 @@ pub mod v1 {
     ));
 
     pub mod pb_conversion {
-        use crate::protobuf_types::v1::entry::EntryType;
-        use crate::protobuf_types::v1::entry::EventEntry;
-        use std::collections::{HashMap, HashSet};
-        use std::str::FromStr;
-
-        use anyhow::anyhow;
-        use bytes::{Buf, Bytes};
-        use bytestring::ByteString;
-        use opentelemetry::trace::TraceState;
-        use prost::Message;
-        use restate_storage_api::invocation_status_table::{
-            CompletionRangeEpochMap, JournalMetadata,
-        };
-        use restate_types::deployment::PinnedDeployment;
-
         use crate::protobuf_types::ConversionError;
         use crate::protobuf_types::v1::dedup_sequence_number::Variant;
         use crate::protobuf_types::v1::enriched_entry_header::{
@@ -141,6 +126,7 @@ pub mod v1 {
             GetInvocationOutput, GetPromise, GetState, GetStateKeys, Input, Invoke, Output,
             PeekPromise, SetState, SideEffect, Sleep,
         };
+        use crate::protobuf_types::v1::entry::EntryType;
         use crate::protobuf_types::v1::invocation_status::{
             Completed, Free, Inboxed, Invoked, Suspended,
         };
@@ -162,7 +148,7 @@ pub mod v1 {
             InboxEntry, InvocationId, InvocationResolutionResult, InvocationStatus,
             InvocationStatusV2, InvocationTarget, InvocationV2Lite, JournalCompletionTarget,
             JournalEntry, JournalEntryIndex, JournalMeta, KvPair, OutboxMessage, Promise,
-            ResponseResult, SequenceNumber, ServiceId, ServiceInvocation,
+            ResponseResult, RestateVersion, SequenceNumber, ServiceId, ServiceInvocation,
             ServiceInvocationResponseSink, Source, SpanContext, SpanRelation, StateMutation,
             SubmitNotificationSink, Timer, VirtualObjectStatus, enriched_entry_header, entry,
             entry_result, inbox_entry, invocation_resolution_result, invocation_status,
@@ -170,12 +156,24 @@ pub mod v1 {
             response_result, source, span_relation, submit_notification_sink, timer,
             virtual_object_status,
         };
+        use anyhow::anyhow;
+        use bytes::{Buf, Bytes};
+        use bytestring::ByteString;
+        use opentelemetry::trace::TraceState;
+        use prost::Message;
         use restate_storage_api::StorageError;
+        use restate_storage_api::invocation_status_table::{
+            CompletionRangeEpochMap, JournalMetadata,
+        };
+        use restate_types::deployment::PinnedDeployment;
         use restate_types::errors::{IdDecodeError, InvocationError};
         use restate_types::identifiers::{
             PartitionProcessorRpcRequestId, WithInvocationId, WithPartitionKey,
         };
-        use restate_types::invocation::{InvocationTermination, TerminationFlavor};
+        use restate_types::invocation::{
+            IngressInvocationResponseSink, InvocationMutationResponseSink, InvocationTermination,
+            TerminationFlavor,
+        };
         use restate_types::journal::enriched::AwakeableEnrichmentResult;
         use restate_types::journal::raw::RawEntry;
         use restate_types::journal_v2::{EntryMetadata, NotificationId, NotificationType};
@@ -185,6 +183,8 @@ pub mod v1 {
         };
         use restate_types::time::MillisSinceEpoch;
         use restate_types::{GenerationalNodeId, journal_v2};
+        use std::collections::{HashMap, HashSet};
+        use std::str::FromStr;
 
         impl TryFrom<VirtualObjectStatus>
             for restate_storage_api::service_status_table::VirtualObjectStatus
@@ -408,6 +408,7 @@ pub mod v1 {
                     source,
                     span_context,
                     creation_time,
+                    created_using_restate_version,
                     modification_time,
                     response_sinks,
                     inboxed_transition_time,
@@ -435,6 +436,8 @@ pub mod v1 {
                 } = value;
 
                 let invocation_target = expect_or_fail!(invocation_target)?.try_into()?;
+                let created_using_restate_version =
+                    restate_version_from_pb(created_using_restate_version);
                 let timestamps =
                     restate_storage_api::invocation_status_table::StatusTimestamps::new(
                         MillisSinceEpoch::new(creation_time),
@@ -469,6 +472,7 @@ pub mod v1 {
                                         response_sinks,
                                         timestamps,
                                         invocation_target,
+                                        created_using_restate_version,
                                         argument: expect_or_fail!(argument)?,
                                         source,
                                         span_context: expect_or_fail!(span_context)?.try_into()?,
@@ -496,6 +500,7 @@ pub mod v1 {
                                         response_sinks,
                                         timestamps,
                                         invocation_target,
+                                        created_using_restate_version,
                                         argument: expect_or_fail!(argument)?,
                                         source,
                                         span_context: expect_or_fail!(span_context)?.try_into()?,
@@ -520,6 +525,7 @@ pub mod v1 {
                                 response_sinks,
                                 timestamps,
                                 invocation_target,
+                                created_using_restate_version,
                                 journal_metadata: restate_storage_api::invocation_status_table::JournalMetadata {
                                     length: journal_length,
                                     commands,
@@ -553,6 +559,7 @@ pub mod v1 {
                                 response_sinks,
                                 timestamps,
                                 invocation_target,
+                                created_using_restate_version,
                                 journal_metadata: restate_storage_api::invocation_status_table::JournalMetadata {
                                     length: journal_length,
                                     commands,
@@ -601,6 +608,7 @@ pub mod v1 {
                             restate_storage_api::invocation_status_table::CompletedInvocation {
                                 timestamps,
                                 invocation_target,
+                                created_using_restate_version,
                                 source,
                                 execution_time: execution_time.map(MillisSinceEpoch::new),
                                 idempotency_key: idempotency_key.map(ByteString::from),
@@ -642,7 +650,7 @@ pub mod v1 {
                                     response_sinks,
                                     timestamps,
                                     invocation_target,
-                                    argument,
+                                    created_using_restate_version, argument,
                                     source,
                                     span_context,
                                     headers,
@@ -658,6 +666,7 @@ pub mod v1 {
                         span_context: Some(span_context.into()),
                         // SAFETY: We're only mapping data types here
                         creation_time: unsafe { timestamps.creation_time() }.as_u64(),
+                        created_using_restate_version: created_using_restate_version.into_string(),
                         modification_time: unsafe { timestamps.modification_time() }.as_u64(),
                         inboxed_transition_time: unsafe { timestamps.inboxed_transition_time() }
                             .map(|t| t.as_u64()),
@@ -701,7 +710,7 @@ pub mod v1 {
                                     response_sinks,
                                     timestamps,
                                     invocation_target,
-                                    argument,
+                                    created_using_restate_version, argument,
                                     source,
                                     span_context,
                                     headers,
@@ -718,6 +727,7 @@ pub mod v1 {
                         span_context: Some(span_context.into()),
                         // SAFETY: We're only mapping data types here
                         creation_time: unsafe { timestamps.creation_time() }.as_u64(),
+                        created_using_restate_version: created_using_restate_version.into_string(),
                         modification_time: unsafe { timestamps.modification_time() }.as_u64(),
                         inboxed_transition_time: unsafe { timestamps.inboxed_transition_time() }
                             .map(|t| t.as_u64()),
@@ -756,7 +766,7 @@ pub mod v1 {
                     restate_storage_api::invocation_status_table::InvocationStatus::Invoked(
                         restate_storage_api::invocation_status_table::InFlightInvocationMetadata {
                             invocation_target,
-                            journal_metadata,
+                            created_using_restate_version, journal_metadata,
                             pinned_deployment,
                             response_sinks,
                             timestamps,
@@ -785,8 +795,9 @@ pub mod v1 {
                             span_context: Some(journal_metadata.span_context.into()),
                             // SAFETY: We're only mapping data types here
                             creation_time: unsafe { timestamps.creation_time() }.as_u64(),
+                            created_using_restate_version: created_using_restate_version.into_string(),
                             modification_time: unsafe { timestamps.modification_time() }.as_u64(),
-                            inboxed_transition_time: unsafe {
+                       inboxed_transition_time: unsafe {
                                 timestamps.inboxed_transition_time()
                             }
                             .map(|t| t.as_u64()),
@@ -834,7 +845,7 @@ pub mod v1 {
                         metadata:
                             restate_storage_api::invocation_status_table::InFlightInvocationMetadata {
                                 invocation_target,
-                                journal_metadata,
+                                created_using_restate_version, journal_metadata,
                                 pinned_deployment,
                                 response_sinks,
                                 timestamps,
@@ -880,6 +891,7 @@ pub mod v1 {
                             span_context: Some(journal_metadata.span_context.into()),
                             // SAFETY: We're only mapping data types here
                             creation_time: unsafe { timestamps.creation_time() }.as_u64(),
+                            created_using_restate_version: created_using_restate_version.into_string(),
                             modification_time: unsafe { timestamps.modification_time() }.as_u64(),
                             inboxed_transition_time: unsafe {
                                 timestamps.inboxed_transition_time()
@@ -928,6 +940,7 @@ pub mod v1 {
                     restate_storage_api::invocation_status_table::InvocationStatus::Completed(
                         restate_storage_api::invocation_status_table::CompletedInvocation {
                             invocation_target,
+                            created_using_restate_version,
                             source,
                             execution_time, idempotency_key,
                             timestamps,
@@ -952,24 +965,26 @@ pub mod v1 {
                             span_context: Some(journal_metadata.span_context.into()),
                             // SAFETY: We're only mapping data types here
                             creation_time: unsafe { timestamps.creation_time() }.as_u64(),
+                            created_using_restate_version: created_using_restate_version.into_string(),
                             modification_time: unsafe { timestamps.modification_time() }.as_u64(),
                             inboxed_transition_time: unsafe { timestamps.inboxed_transition_time() }
                                 .map(|t| t.as_u64()),
                             scheduled_transition_time: unsafe {
                                 timestamps.scheduled_transition_time()
                             }
-                                .map(|t| t.as_u64()),
+                            .map(|t| t.as_u64()),
                             running_transition_time: unsafe { timestamps.running_transition_time() }
                                 .map(|t| t.as_u64()),
                             completed_transition_time: unsafe {
                                 timestamps.completed_transition_time()
                             }
-                                .map(|t| t.as_u64()),
+                            .map(|t| t.as_u64()),
                             response_sinks: vec![],
                             argument: None,
                             headers: vec![],
                             execution_time: execution_time.map(|t| t.as_u64()),
-                            completion_retention_duration: Some(completion_retention_duration.into()),    journal_retention_duration: Some(journal_retention_duration.into()),
+                            completion_retention_duration: Some(completion_retention_duration.into()),
+                            journal_retention_duration: Some(journal_retention_duration.into()),
                             idempotency_key: idempotency_key.map(|key| key.to_string()),
                             inbox_sequence_number: None,
                             journal_length: journal_metadata.length,
@@ -1225,6 +1240,7 @@ pub mod v1 {
                         journal_metadata,
                         pinned_deployment,
                         response_sinks,
+                        created_using_restate_version: restate_types::RestateVersion::unknown(),
                         timestamps:
                             restate_storage_api::invocation_status_table::StatusTimestamps::new(
                                 MillisSinceEpoch::new(value.creation_time),
@@ -1343,6 +1359,7 @@ pub mod v1 {
                 Ok((
                     restate_storage_api::invocation_status_table::InFlightInvocationMetadata {
                         invocation_target,
+                        created_using_restate_version: restate_types::RestateVersion::unknown(),
                         journal_metadata,
                         pinned_deployment,
                         response_sinks,
@@ -1470,6 +1487,7 @@ pub mod v1 {
                 Ok(restate_storage_api::invocation_status_table::InboxedInvocation {
                     inbox_sequence_number: value.inbox_sequence_number,
                     metadata: restate_storage_api::invocation_status_table::PreFlightInvocationMetadata {
+                        created_using_restate_version:   restate_types::RestateVersion::unknown(),
                         response_sinks,
                         timestamps: restate_storage_api::invocation_status_table::StatusTimestamps::new(
                             MillisSinceEpoch::new(value.creation_time),
@@ -1503,6 +1521,7 @@ pub mod v1 {
                             response_sinks,
                             timestamps,
                             invocation_target,
+                            created_using_restate_version: _,
                             argument,
                             source,
                             span_context,
@@ -1558,6 +1577,7 @@ pub mod v1 {
                 Ok(
                     restate_storage_api::invocation_status_table::CompletedInvocation {
                         invocation_target,
+                        created_using_restate_version: restate_types::RestateVersion::unknown(),
                         source,
                         timestamps:
                             restate_storage_api::invocation_status_table::StatusTimestamps::new(
@@ -1591,6 +1611,7 @@ pub mod v1 {
             ) -> Self {
                 let restate_storage_api::invocation_status_table::CompletedInvocation {
                     invocation_target,
+                    created_using_restate_version: _,
                     source,
                     execution_time: _,
                     idempotency_key,
@@ -1721,6 +1742,35 @@ pub mod v1 {
             }
         }
 
+        impl From<&restate_types::invocation::Source> for Source {
+            fn from(value: &restate_types::invocation::Source) -> Self {
+                let source = match value {
+                    restate_types::invocation::Source::Ingress(rpc_id) => {
+                        source::Source::Ingress(source::Ingress {
+                            rpc_id: rpc_id.to_bytes().to_vec().into(),
+                        })
+                    }
+                    restate_types::invocation::Source::Subscription(sub_id) => {
+                        source::Source::Subscription(source::Subscription {
+                            subscription_id: sub_id.to_bytes().to_vec().into(),
+                        })
+                    }
+                    restate_types::invocation::Source::Service(
+                        invocation_id,
+                        invocation_target,
+                    ) => source::Source::Service(source::Service {
+                        invocation_id: Some(InvocationId::from(*invocation_id)),
+                        invocation_target: Some(InvocationTarget::from(invocation_target)),
+                    }),
+                    restate_types::invocation::Source::Internal => source::Source::Internal(()),
+                };
+
+                Source {
+                    source: Some(source),
+                }
+            }
+        }
+
         impl TryFrom<InboxEntry> for restate_storage_api::inbox_table::InboxEntry {
             type Error = ConversionError;
 
@@ -1791,6 +1841,7 @@ pub mod v1 {
                     completion_retention_duration,
                     journal_retention_duration,
                     submit_notification_sink,
+                    restate_version,
                 } = value;
 
                 let invocation_id = restate_types::identifiers::InvocationId::try_from(
@@ -1854,6 +1905,7 @@ pub mod v1 {
                     journal_retention_duration,
                     idempotency_key,
                     submit_notification_sink,
+                    restate_version: restate_version_from_pb(restate_version),
                 })
             }
         }
@@ -1879,6 +1931,60 @@ pub mod v1 {
                     journal_retention_duration: Some(value.journal_retention_duration.into()),
                     idempotency_key: value.idempotency_key.map(|s| s.to_string()),
                     submit_notification_sink: value.submit_notification_sink.map(Into::into),
+                    restate_version: value.restate_version.into_string(),
+                }
+            }
+        }
+
+        impl From<Box<restate_types::invocation::ServiceInvocation>> for ServiceInvocation {
+            fn from(value: Box<restate_types::invocation::ServiceInvocation>) -> Self {
+                let invocation_target = InvocationTarget::from(value.invocation_target);
+                let span_context = SpanContext::from(value.span_context);
+                let response_sink = ServiceInvocationResponseSink::from(value.response_sink);
+                let source = Source::from(value.source);
+                let headers = value.headers.into_iter().map(Into::into).collect();
+
+                ServiceInvocation {
+                    invocation_id: Some(InvocationId::from(value.invocation_id)),
+                    invocation_target: Some(invocation_target),
+                    span_context: Some(span_context),
+                    response_sink: Some(response_sink),
+                    argument: value.argument,
+                    source: Some(source),
+                    headers,
+                    execution_time: value.execution_time.map(|m| m.as_u64()).unwrap_or_default(),
+                    completion_retention_duration: Some(value.completion_retention_duration.into()),
+                    journal_retention_duration: Some(value.journal_retention_duration.into()),
+                    idempotency_key: value.idempotency_key.map(|s| s.to_string()),
+                    submit_notification_sink: value.submit_notification_sink.map(Into::into),
+                    restate_version: value.restate_version.into_string(),
+                }
+            }
+        }
+
+        impl From<&restate_types::invocation::ServiceInvocation> for ServiceInvocation {
+            fn from(value: &restate_types::invocation::ServiceInvocation) -> Self {
+                let invocation_target = InvocationTarget::from(&value.invocation_target);
+                let span_context = SpanContext::from(&value.span_context);
+                let response_sink =
+                    ServiceInvocationResponseSink::from(value.response_sink.as_ref());
+                let source = Source::from(&value.source);
+                let headers = value.headers.iter().map(|h| h.clone().into()).collect();
+
+                ServiceInvocation {
+                    invocation_id: Some(InvocationId::from(value.invocation_id)),
+                    invocation_target: Some(invocation_target),
+                    span_context: Some(span_context),
+                    response_sink: Some(response_sink),
+                    argument: value.argument.clone(),
+                    source: Some(source),
+                    headers,
+                    execution_time: value.execution_time.map(|m| m.as_u64()).unwrap_or_default(),
+                    completion_retention_duration: Some(value.completion_retention_duration.into()),
+                    journal_retention_duration: Some(value.journal_retention_duration.into()),
+                    idempotency_key: value.idempotency_key.as_ref().map(|s| s.to_string()),
+                    submit_notification_sink: value.submit_notification_sink.map(Into::into),
+                    restate_version: value.restate_version.clone().into_string(),
                 }
             }
         }
@@ -2075,6 +2181,59 @@ pub mod v1 {
             }
         }
 
+        impl From<&restate_types::invocation::InvocationTarget> for InvocationTarget {
+            fn from(value: &restate_types::invocation::InvocationTarget) -> Self {
+                match value {
+                    restate_types::invocation::InvocationTarget::Service { name, handler } => {
+                        InvocationTarget {
+                            name: name.as_bytes().clone(),
+                            handler: handler.as_bytes().clone(),
+                            service_and_handler_ty: invocation_target::Ty::Service.into(),
+                            ..InvocationTarget::default()
+                        }
+                    }
+                    restate_types::invocation::InvocationTarget::VirtualObject {
+                        name,
+                        key,
+                        handler,
+                        handler_ty,
+                    } => InvocationTarget {
+                        name: name.as_bytes().clone(),
+                        handler: handler.as_bytes().clone(),
+                        key: key.as_bytes().clone(),
+                        service_and_handler_ty: match handler_ty {
+                            restate_types::invocation::VirtualObjectHandlerType::Shared => {
+                                invocation_target::Ty::VirtualObjectShared
+                            }
+                            restate_types::invocation::VirtualObjectHandlerType::Exclusive => {
+                                invocation_target::Ty::VirtualObjectExclusive
+                            }
+                        }
+                        .into(),
+                    },
+                    restate_types::invocation::InvocationTarget::Workflow {
+                        name,
+                        key,
+                        handler,
+                        handler_ty,
+                    } => InvocationTarget {
+                        name: name.as_bytes().clone(),
+                        handler: handler.as_bytes().clone(),
+                        key: key.as_bytes().clone(),
+                        service_and_handler_ty: match handler_ty {
+                            restate_types::invocation::WorkflowHandlerType::Shared => {
+                                invocation_target::Ty::WorkflowShared
+                            }
+                            restate_types::invocation::WorkflowHandlerType::Workflow => {
+                                invocation_target::Ty::WorkflowWorkflow
+                            }
+                        }
+                        .into(),
+                    },
+                }
+            }
+        }
+
         impl TryFrom<ServiceId> for restate_types::identifiers::ServiceId {
             type Error = ConversionError;
 
@@ -2148,6 +2307,29 @@ pub mod v1 {
 
         impl From<restate_types::invocation::ServiceInvocationSpanContext> for SpanContext {
             fn from(value: restate_types::invocation::ServiceInvocationSpanContext) -> Self {
+                let span_context = value.span_context();
+                let trace_state = span_context.trace_state().header();
+                let span_id = u64::from_be_bytes(span_context.span_id().to_bytes());
+                let trace_flags = u32::from(span_context.trace_flags().to_u8());
+                let trace_id = Bytes::copy_from_slice(&span_context.trace_id().to_bytes());
+                let is_remote = span_context.is_remote();
+                let span_relation = value
+                    .span_cause()
+                    .map(|span_relation| SpanRelation::from(span_relation.clone()));
+
+                SpanContext {
+                    trace_state,
+                    span_id,
+                    trace_flags,
+                    trace_id,
+                    is_remote,
+                    span_relation,
+                }
+            }
+        }
+
+        impl From<&restate_types::invocation::ServiceInvocationSpanContext> for SpanContext {
+            fn from(value: &restate_types::invocation::ServiceInvocationSpanContext) -> Self {
                 let span_context = value.span_context();
                 let trace_state = span_context.trace_state().header();
                 let span_id = u64::from_be_bytes(span_context.span_id().to_bytes());
@@ -2274,6 +2456,36 @@ pub mod v1 {
                         entry_index: caller_completion_id,
                         caller: caller_id.into(),
                         caller_invocation_epoch
+                    }),
+                    Some(restate_types::invocation::ServiceInvocationResponseSink::Ingress {  request_id }) => {
+                        ResponseSink::Ingress(Ingress {
+                            request_id: Bytes::copy_from_slice(&request_id.to_bytes())
+                        })
+                    },
+                    None => ResponseSink::None(Default::default()),
+                };
+
+                ServiceInvocationResponseSink {
+                    response_sink: Some(response_sink),
+                }
+            }
+        }
+
+        impl From<Option<&restate_types::invocation::ServiceInvocationResponseSink>>
+            for ServiceInvocationResponseSink
+        {
+            fn from(
+                value: Option<&restate_types::invocation::ServiceInvocationResponseSink>,
+            ) -> Self {
+                let response_sink = match value {
+                    Some(
+                        restate_types::invocation::ServiceInvocationResponseSink::PartitionProcessor(restate_types::invocation::JournalCompletionTarget {
+                                                                                                         caller_id, caller_completion_id, caller_invocation_epoch
+                                                                                                     }),
+                    ) => ResponseSink::PartitionProcessor(PartitionProcessor {
+                        entry_index: *caller_completion_id,
+                        caller: (*caller_id).into(),
+                        caller_invocation_epoch: *caller_invocation_epoch,
                     }),
                     Some(restate_types::invocation::ServiceInvocationResponseSink::Ingress {  request_id }) => {
                         ResponseSink::Ingress(Ingress {
@@ -3150,22 +3362,15 @@ pub mod v1 {
                         .try_into()?
                     {
                         journal_v2::EntryType::Event => {
-                            let event_entry = EventEntry::decode(value.content)
-                                .map_err(|e| ConversionError::InvalidData(e.into()))?;
-                            journal_v2::raw::RawEntry::new(
-                                header,
-                                journal_v2::Event {
-                                    ty: event_entry
-                                        .ty
-                                        .parse::<journal_v2::EventType>()
-                                        .map_err(|e| ConversionError::InvalidData(e.into()))?,
-                                    metadata: event_entry
-                                        .metadata
-                                        .into_iter()
-                                        .map(|(k, v)| (k, v.into()))
-                                        .collect(),
-                                },
-                            )
+                            let event_type = journal_v2::EventType::from(
+                                entry::EventType::try_from(value.event_type).unwrap_or_default(),
+                            );
+                            let mut raw_event =
+                                journal_v2::raw::RawEvent::new(event_type, value.content);
+                            if let Some(deduplication_hash) = value.event_deduplication_hash {
+                                raw_event.set_deduplication_hash(deduplication_hash);
+                            }
+                            journal_v2::raw::RawEntry::new(header, raw_event)
                         }
                         journal_v2::EntryType::Notification(notification_ty) => {
                             let notification_id = match value
@@ -3199,7 +3404,7 @@ pub mod v1 {
                             header,
                             journal_v2::raw::RawCommand::new(ct, value.content)
                                 .with_command_specific_metadata(
-                                journal_v2::raw::RawCommandSpecificMetadata::CallOrSend(
+                                journal_v2::raw::RawCommandSpecificMetadata::CallOrSend(Box::new(
                                     journal_v2::raw::CallOrSendMetadata::try_from(
                                         value.call_or_send_command_metadata.ok_or(
                                             ConversionError::missing_field(
@@ -3207,7 +3412,7 @@ pub mod v1 {
                                             ),
                                         )?,
                                     )?,
-                                ),
+                                )),
                             ),
                         ),
                         journal_v2::EntryType::Command(ct) => journal_v2::raw::RawEntry::new(
@@ -3226,22 +3431,24 @@ pub mod v1 {
                 let ty = EntryType::from(raw_entry.ty());
                 let append_time = raw_entry.header().append_time.into();
 
+                let mut event_type = entry::EventType::UnknownEvent;
+                let mut event_deduplication_hash = None;
                 let mut call_or_send_command_metadata: Option<entry::CallOrSendCommandMetadata> =
                     None;
                 let mut notification_id: Option<entry::NotificationId> = None;
                 let content = match raw_entry.inner {
                     journal_v2::raw::RawEntryInner::Command(cmd) => {
-                        match cmd.command_specific_metadata() {
+                        match cmd.command_specific_metadata {
                             journal_v2::raw::RawCommandSpecificMetadata::CallOrSend(
                                 call_or_send_metadata,
                             ) => {
                                 call_or_send_command_metadata =
-                                    Some(call_or_send_metadata.clone().into())
+                                    Some((*call_or_send_metadata).into())
                             }
                             journal_v2::raw::RawCommandSpecificMetadata::None => {}
                         };
 
-                        cmd.serialized_content()
+                        cmd.serialized_content
                     }
                     journal_v2::raw::RawEntryInner::Notification(notification) => {
                         notification_id = Some(match notification.id() {
@@ -3258,16 +3465,12 @@ pub mod v1 {
 
                         notification.serialized_content()
                     }
-                    journal_v2::raw::RawEntryInner::Event(event) => EventEntry {
-                        ty: event.ty.to_string(),
-                        metadata: event
-                            .metadata
-                            .into_iter()
-                            .map(|(k, v)| (k, v.to_string()))
-                            .collect(),
+                    journal_v2::raw::RawEntryInner::Event(event) => {
+                        let (ty, deduplication_hash, value) = event.into_inner();
+                        event_type = ty.into();
+                        event_deduplication_hash = deduplication_hash;
+                        value
                     }
-                    .encode_to_vec()
-                    .into(),
                 };
 
                 Entry {
@@ -3275,7 +3478,27 @@ pub mod v1 {
                     content,
                     append_time,
                     call_or_send_command_metadata,
+                    event_type: event_type.into(),
+                    event_deduplication_hash,
                     notification_id,
+                }
+            }
+        }
+
+        impl From<journal_v2::EventType> for entry::EventType {
+            fn from(value: journal_v2::EventType) -> Self {
+                match value {
+                    journal_v2::EventType::TransientError => entry::EventType::TransientError,
+                    journal_v2::EventType::Unknown => entry::EventType::UnknownEvent,
+                }
+            }
+        }
+
+        impl From<entry::EventType> for journal_v2::EventType {
+            fn from(value: entry::EventType) -> Self {
+                match value {
+                    entry::EventType::TransientError => journal_v2::EventType::TransientError,
+                    entry::EventType::UnknownEvent => journal_v2::EventType::Unknown,
                 }
             }
         }
@@ -3495,11 +3718,11 @@ pub mod v1 {
                 {
                     outbox_message::OutboxMessage::ServiceInvocationCase(service_invocation) => {
                         restate_storage_api::outbox_table::OutboxMessage::ServiceInvocation(
-                            restate_types::invocation::ServiceInvocation::try_from(
+                            Box::new(restate_types::invocation::ServiceInvocation::try_from(
                                 service_invocation
                                     .service_invocation
                                     .ok_or(ConversionError::missing_field("service_invocation"))?,
-                            )?,
+                            )?),
                         )
                     }
                     outbox_message::OutboxMessage::ServiceInvocationResponse(
@@ -3509,24 +3732,28 @@ pub mod v1 {
                     ),
                     outbox_message::OutboxMessage::Kill(outbox_kill) => {
                         restate_storage_api::outbox_table::OutboxMessage::InvocationTermination(
-                            InvocationTermination::kill(
-                                restate_types::identifiers::InvocationId::try_from(
+                            InvocationTermination {
+                                invocation_id: restate_types::identifiers::InvocationId::try_from(
                                     outbox_kill
                                         .invocation_id
                                         .ok_or(ConversionError::missing_field("invocation_id"))?,
                                 )?,
-                            ),
+                                flavor: TerminationFlavor::Kill,
+                                response_sink: None,
+                            },
                         )
                     }
                     outbox_message::OutboxMessage::Cancel(outbox_cancel) => {
                         restate_storage_api::outbox_table::OutboxMessage::InvocationTermination(
-                            InvocationTermination::cancel(
-                                restate_types::identifiers::InvocationId::try_from(
+                            InvocationTermination {
+                                invocation_id: restate_types::identifiers::InvocationId::try_from(
                                     outbox_cancel
                                         .invocation_id
                                         .ok_or(ConversionError::missing_field("invocation_id"))?,
                                 )?,
-                            ),
+                                flavor: TerminationFlavor::Cancel,
+                                response_sink: None,
+                            },
                         )
                     }
                     outbox_message::OutboxMessage::AttachInvocationRequest(
@@ -3571,22 +3798,28 @@ pub mod v1 {
                     ),
                     restate_storage_api::outbox_table::OutboxMessage::InvocationTermination(
                         invocation_termination,
-                    ) => match invocation_termination.flavor {
-                        TerminationFlavor::Kill => {
-                            outbox_message::OutboxMessage::Kill(OutboxKill {
-                                invocation_id: Some(InvocationId::from(
-                                    invocation_termination.invocation_id,
-                                )),
-                            })
+                    ) => {
+                        debug_assert!(
+                            invocation_termination.response_sink.is_none(),
+                            "Response sink is unsupported for outbox messages"
+                        );
+                        match invocation_termination.flavor {
+                            TerminationFlavor::Kill => {
+                                outbox_message::OutboxMessage::Kill(OutboxKill {
+                                    invocation_id: Some(InvocationId::from(
+                                        invocation_termination.invocation_id,
+                                    )),
+                                })
+                            }
+                            TerminationFlavor::Cancel => {
+                                outbox_message::OutboxMessage::Cancel(OutboxCancel {
+                                    invocation_id: Some(InvocationId::from(
+                                        invocation_termination.invocation_id,
+                                    )),
+                                })
+                            }
                         }
-                        TerminationFlavor::Cancel => {
-                            outbox_message::OutboxMessage::Cancel(OutboxCancel {
-                                invocation_id: Some(InvocationId::from(
-                                    invocation_termination.invocation_id,
-                                )),
-                            })
-                        }
-                    },
+                    }
                     restate_storage_api::outbox_table::OutboxMessage::AttachInvocation(
                         attach_invocation_request,
                     ) => outbox_message::OutboxMessage::AttachInvocationRequest(
@@ -3668,9 +3901,9 @@ pub mod v1 {
                             )
                         }
                         timer::Value::Invoke(si) => {
-                            restate_storage_api::timer_table::Timer::Invoke(
+                            restate_storage_api::timer_table::Timer::Invoke(Box::new(
                                 restate_types::invocation::ServiceInvocation::try_from(si)?,
-                            )
+                            ))
                         }
                         timer::Value::ScheduledInvoke(id) => {
                             restate_storage_api::timer_table::Timer::NeoInvoke(
@@ -3879,6 +4112,20 @@ pub mod v1 {
             }
         }
 
+        impl From<RestateVersion> for restate_types::SemanticRestateVersion {
+            fn from(value: RestateVersion) -> Self {
+                Self::parse(&value.version).unwrap_or_default()
+            }
+        }
+
+        impl From<restate_types::SemanticRestateVersion> for RestateVersion {
+            fn from(value: restate_types::SemanticRestateVersion) -> Self {
+                RestateVersion {
+                    version: value.to_string(),
+                }
+            }
+        }
+
         impl From<crate::fsm_table::SequenceNumber> for SequenceNumber {
             fn from(value: crate::fsm_table::SequenceNumber) -> Self {
                 SequenceNumber {
@@ -3904,6 +4151,14 @@ pub mod v1 {
         impl From<JournalEntryIndex> for crate::journal_table_v2::JournalEntryIndex {
             fn from(value: JournalEntryIndex) -> Self {
                 Self::from(value.entry_index)
+            }
+        }
+
+        fn restate_version_from_pb(restate_version: String) -> restate_types::RestateVersion {
+            if restate_version.is_empty() {
+                restate_types::RestateVersion::unknown()
+            } else {
+                restate_types::RestateVersion::new(restate_version)
             }
         }
     }

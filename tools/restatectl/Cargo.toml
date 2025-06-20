@@ -48,7 +48,7 @@ tempfile = { workspace = true, optional = true }
 
 anyhow = { workspace = true }
 assert2 = {workspace = true }
-arrow = { workspace = true, features = ["ipc"] }
+arrow = { workspace = true, features = ["ipc", "json"] }
 bytes = { workspace = true }
 bytesize = { workspace = true }
 bytestring = { workspace = true }
@@ -63,7 +63,6 @@ futures = { workspace = true }
 itertools = { workspace = true }
 json-patch = "2.0.0"
 humantime = { workspace = true }
-lambda_runtime = "0.13.0"
 prost-types = { workspace = true }
 rand = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs"]}

@@ -11,36 +11,32 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::collections::hash_map::Entry;
-use std::iter;
-use std::time::Duration;
 
 use ahash::HashMap;
-use tracing::{Level, debug, enabled, info, instrument, trace};
+use tracing::{debug, info, trace};
 
-use crate::cluster_controller::observed_cluster_state::ObservedClusterState;
 use restate_core::network::{NetworkSender as _, Networking, Swimlane, TransportConnect};
 use restate_core::{Metadata, MetadataWriter, ShutdownError, SyncError, TaskCenter, TaskKind};
-use restate_futures_util::overdue::OverdueLoggingExt;
 use restate_metadata_store::{
     MetadataStoreClient, ReadError, ReadModifyWriteError, ReadWriteError, WriteError,
 };
-use restate_types::cluster::cluster_state::{ReplayStatus, RunMode};
+use restate_types::cluster::cluster_state::LegacyClusterState;
+use restate_types::cluster_state::ClusterState;
 use restate_types::epoch::EpochMetadata;
 use restate_types::identifiers::PartitionId;
-use restate_types::metadata::Precondition;
 use restate_types::metadata_store::keys::partition_processor_epoch_key;
 use restate_types::net::partition_processor_manager::{
     ControlProcessor, ControlProcessors, ProcessorCommand,
 };
 use restate_types::nodes_config::{NodeConfig, NodesConfiguration};
-use restate_types::partition_table::{PartitionPlacement, PartitionReplication, PartitionTable};
+use restate_types::partition_table::{PartitionReplication, PartitionTable};
 use restate_types::partitions::state::{PartitionReplicaSetStates, ReplicaSetState};
 use restate_types::partitions::{PartitionConfiguration, worker_candidate_filter};
 use restate_types::replication::balanced_spread_selector::{
     BalancedSpreadSelector, SelectorOptions,
 };
 use restate_types::replication::{NodeSet, ReplicationProperty};
-use restate_types::{PlainNodeId, Version, Versioned};
+use restate_types::{NodeId, PlainNodeId, Version, Versioned};
 
 #[derive(Debug, thiserror::Error)]
 #[error("failed reading scheduling plan from metadata store: {0}")]
@@ -82,6 +78,15 @@ impl PartitionState {
         current: PartitionConfiguration,
         next: Option<PartitionConfiguration>,
     ) -> bool {
+        // If the provided current configuration is not valid, then this means that the epoch
+        // metadata was clobbered by an old version. Reset the partition state so that the scheduler
+        // finds a new valid configuration on the next event/tick.
+        if !current.is_valid() && self.current.is_valid() {
+            self.current = current;
+            self.next = None;
+            return true;
+        }
+
         let mut updated = false;
 
         if self.current.version() < current.version() {
@@ -119,27 +124,14 @@ impl PartitionState {
         updated
     }
 
-    fn replicas(&self) -> impl Iterator<Item = &PlainNodeId> {
-        self.current.replica_set().iter().chain(
-            self.next
-                .as_ref()
-                .map(|config| itertools::Either::Left(config.replica_set().iter()))
-                .unwrap_or(itertools::Either::Right(iter::empty())),
-        )
-    }
-
     fn generate_instructions(
         &self,
         partition_id: &PartitionId,
-        observed_cluster_state: &ObservedClusterState,
+        legacy_cluster_state: &LegacyClusterState,
         commands: &mut BTreeMap<PlainNodeId, Vec<ControlProcessor>>,
     ) {
         if let Some(leader) = &self.target_leader {
-            if !observed_cluster_state
-                .partition_state(partition_id)
-                .and_then(|state| state.partition_processors.get(leader))
-                .is_some_and(|state| state.run_mode == RunMode::Leader)
-            {
+            if !legacy_cluster_state.runs_partition_processor_leader(leader, partition_id) {
                 commands.entry(*leader).or_default().push(ControlProcessor {
                     partition_id: *partition_id,
                     command: ProcessorCommand::Leader,
@@ -160,6 +152,7 @@ pub struct Scheduler<T> {
     networking: Networking<T>,
     partitions: HashMap<PartitionId, PartitionState>,
     replica_set_states: PartitionReplicaSetStates,
+    cluster_state: ClusterState,
 }
 
 /// The scheduler is responsible for assigning partition processors to nodes and to electing
@@ -177,6 +170,7 @@ impl<T: TransportConnect> Scheduler<T> {
             networking,
             partitions: HashMap::default(),
             replica_set_states,
+            cluster_state: TaskCenter::with_current(|h| h.cluster_state().clone()),
         }
     }
 
@@ -225,15 +219,20 @@ impl<T: TransportConnect> Scheduler<T> {
         );
     }
 
-    pub async fn on_observed_cluster_state(
+    pub async fn on_cluster_state_change(
         &mut self,
-        observed_cluster_state: &ObservedClusterState,
+        cluster_state: &ClusterState,
+        legacy_cluster_state: &LegacyClusterState,
         nodes_config: &NodesConfiguration,
+        partition_table: &PartitionTable,
     ) -> Result<(), Error> {
-        trace!(?observed_cluster_state, "On observed cluster state");
-
-        self.ensure_valid_partition_configuration(observed_cluster_state, nodes_config)
-            .await?;
+        self.ensure_valid_partition_configuration(
+            cluster_state,
+            legacy_cluster_state,
+            nodes_config,
+            partition_table,
+        )
+        .await?;
 
         // todo move draining workers to disabled if they no longer run any partition processors;
         //  since the worker state is stored in the NodesConfiguration and the replica sets are
@@ -242,20 +241,18 @@ impl<T: TransportConnect> Scheduler<T> {
         //  they learn about the updated nodes configuration. To reduce the risk of this, we should
         //  wait a little bit to give the nodes configuration time to be spread across the cluster.
 
-        self.instruct_nodes(observed_cluster_state)?;
+        self.instruct_nodes(legacy_cluster_state)?;
 
         Ok(())
     }
 
     async fn ensure_valid_partition_configuration(
         &mut self,
-        observed_cluster_state: &ObservedClusterState,
+        cluster_state: &ClusterState,
+        legacy_cluster_state: &LegacyClusterState,
         nodes_config: &NodesConfiguration,
+        partition_table: &PartitionTable,
     ) -> Result<(), Error> {
-        let partition_table = Metadata::with_current(|m| m.partition_table_ref());
-
-        let version = partition_table.version();
-
         // todo a bulk get of all EpochMetadata if self.partitions.is_empty()
 
         for partition_id in partition_table.iter_ids().copied() {
@@ -266,13 +263,14 @@ impl<T: TransportConnect> Scheduler<T> {
                 Entry::Occupied(mut entry) if entry.get().current.is_valid() => {
                     let partition_replication = Self::partition_replication_to_replication_property(
                         nodes_config,
-                        &partition_table,
+                        partition_table,
                     );
                     if Self::requires_reconfiguration(
                         partition_id,
                         entry.get(),
                         &partition_replication,
                         nodes_config,
+                        &self.cluster_state,
                     ) {
                         trace!("Partition {} requires reconfiguration", partition_id);
 
@@ -281,24 +279,31 @@ impl<T: TransportConnect> Scheduler<T> {
                             nodes_config,
                             partition_replication,
                             NodeSet::new(),
+                            &self.cluster_state,
                         ) {
-                            *entry.get_mut() = Self::reconfigure_partition_configuration(
-                                self.metadata_writer.raw_metadata_store_client(),
-                                partition_id,
-                                entry
-                                    .get()
-                                    .next
-                                    .as_ref()
-                                    .map(|next| next.version())
-                                    .unwrap_or_else(|| entry.get().current.version()),
-                                next,
-                            )
-                            .await?;
-                            Self::note_observed_membership_update(
-                                partition_id,
-                                entry.get(),
-                                &self.replica_set_states,
-                            );
+                            let partition_configuration_update =
+                                Self::reconfigure_partition_configuration(
+                                    self.metadata_writer.raw_metadata_store_client(),
+                                    partition_id,
+                                    entry
+                                        .get()
+                                        .next
+                                        .as_ref()
+                                        .map(|next| next.version())
+                                        .unwrap_or_else(|| entry.get().current.version()),
+                                    next,
+                                )
+                                .await?;
+                            if entry.get_mut().update_configuration(
+                                partition_configuration_update.current,
+                                partition_configuration_update.next,
+                            ) {
+                                Self::note_observed_membership_update(
+                                    partition_id,
+                                    entry.get(),
+                                    &self.replica_set_states,
+                                );
+                            }
                         }
                     }
 
@@ -307,7 +312,7 @@ impl<T: TransportConnect> Scheduler<T> {
                 entry => {
                     let partition_replication = Self::partition_replication_to_replication_property(
                         nodes_config,
-                        &partition_table,
+                        partition_table,
                     );
 
                     // no or no valid current configuration, pick a valid configuration
@@ -316,6 +321,7 @@ impl<T: TransportConnect> Scheduler<T> {
                         nodes_config,
                         partition_replication.clone(),
                         NodeSet::default(),
+                        &self.cluster_state,
                     ) {
                         let occupied_entry = entry.insert_entry(
                             Self::store_initial_partition_configuration(
@@ -343,7 +349,7 @@ impl<T: TransportConnect> Scheduler<T> {
             // next configuration has become active
             if let Some(next) = &occupied_entry.get().next {
                 if next.replica_set().iter().any(|node_id| {
-                    observed_cluster_state.is_partition_processor_active(&partition_id, node_id)
+                    legacy_cluster_state.is_partition_processor_active(&partition_id, node_id)
                 }) {
                     let partition_configuration_update = Self::complete_reconfiguration(
                         self.metadata_writer.raw_metadata_store_client(),
@@ -366,34 +372,7 @@ impl<T: TransportConnect> Scheduler<T> {
             }
 
             // select the leader based on the observed cluster state
-            self.select_leader(&partition_id, observed_cluster_state);
-        }
-
-        // update the PartitionTable placement which is still needed for routing messages from the
-        // ingress and datafusion
-        let mut builder = partition_table.clone().into_builder();
-        builder.for_each(|partition_id, placement| {
-            self.update_placement(partition_id, placement);
-        });
-
-        if let Some(partition_table) = builder.build_if_modified() {
-            if enabled!(Level::TRACE) {
-                debug!(
-                    ?partition_table,
-                    "Will attempt to write partition table {} to metadata store",
-                    partition_table.version()
-                );
-            } else {
-                debug!(
-                    "Will attempt to write partition table {} to metadata store",
-                    partition_table.version()
-                );
-            }
-
-            self.try_update_partition_table(version, partition_table)
-                .await?;
-
-            return Ok(());
+            self.select_leader(&partition_id, cluster_state, legacy_cluster_state);
         }
 
         Ok(())
@@ -403,7 +382,7 @@ impl<T: TransportConnect> Scheduler<T> {
         nodes_config: &NodesConfiguration,
         partition_table: &PartitionTable,
     ) -> ReplicationProperty {
-        let partition_replication = match partition_table.replication() {
+        match partition_table.replication() {
             PartitionReplication::Everywhere => {
                 // only kept for backwards compatibility; this can be removed once
                 // we no longer need to support the Everywhere variant
@@ -416,8 +395,7 @@ impl<T: TransportConnect> Scheduler<T> {
                 ReplicationProperty::new_unchecked(candidates.min(usize::from(u8::MAX)) as u8)
             }
             PartitionReplication::Limit(partition_replication) => partition_replication.clone(),
-        };
-        partition_replication
+        }
     }
 
     async fn store_initial_partition_configuration(
@@ -430,9 +408,9 @@ impl<T: TransportConnect> Scheduler<T> {
                 partition_processor_epoch_key(partition_id),
                 |epoch_metadata: Option<EpochMetadata>| {
                     if let Some(epoch_metadata) = epoch_metadata {
-                        // check if current has been modified in the meantime
-                        if epoch_metadata.current().version() < current.version() {
-                            Ok(epoch_metadata.update_current_configuration(current.clone()))
+                        // check whether someone else stored an initial current partition configuration
+                        if epoch_metadata.current().version() == Version::INVALID {
+                            Ok(epoch_metadata.set_initial_current_configuration(current.clone()))
                         } else {
                             let (_, _, current, next) = epoch_metadata.into_inner();
                             Err(PartitionConfigurationUpdate { current, next })
@@ -444,9 +422,10 @@ impl<T: TransportConnect> Scheduler<T> {
             )
             .await
         {
-            Ok(_) => {
+            Ok(epoch_metadata) => {
+                let (_, _, current, next) = epoch_metadata.into_inner();
                 debug!("Initialized partition {} with {:?}", partition_id, current);
-                Ok(PartitionState::new(current, None))
+                Ok(PartitionState::new(current, next))
             }
             Err(ReadModifyWriteError::FailedOperation(concurrent_update)) => Ok(
                 PartitionState::new(concurrent_update.current, concurrent_update.next),
@@ -460,7 +439,7 @@ impl<T: TransportConnect> Scheduler<T> {
         partition_id: PartitionId,
         expected_next_version: Version,
         next: PartitionConfiguration,
-    ) -> Result<PartitionState, Error> {
+    ) -> Result<PartitionConfigurationUpdate, Error> {
         match metadata_store_client
             .read_modify_write(
                 partition_processor_epoch_key(partition_id),
@@ -491,11 +470,9 @@ impl<T: TransportConnect> Scheduler<T> {
             Ok(epoch_metadata) => {
                 debug!(%partition_id, "Reconfigured partition to {next:?}");
                 let (_, _, current, next) = epoch_metadata.into_inner();
-                Ok(PartitionState::new(current, next))
+                Ok(PartitionConfigurationUpdate { current, next })
             }
-            Err(ReadModifyWriteError::FailedOperation(concurrent_update)) => Ok(
-                PartitionState::new(concurrent_update.current, concurrent_update.next),
-            ),
+            Err(ReadModifyWriteError::FailedOperation(concurrent_update)) => Ok(concurrent_update),
             Err(ReadModifyWriteError::ReadWrite(err)) => Err(err.into()),
         }
     }
@@ -571,6 +548,7 @@ impl<T: TransportConnect> Scheduler<T> {
         partition_state: &PartitionState,
         default_replication: &ReplicationProperty,
         nodes_config: &NodesConfiguration,
+        cluster_state: &ClusterState,
     ) -> bool {
         let next_requires_reconfiguration = partition_state.next.as_ref().map(|next| {
             next.replication() != default_replication ||
@@ -580,6 +558,7 @@ impl<T: TransportConnect> Scheduler<T> {
                     nodes_config,
                     default_replication.clone(),
                     NodeSet::default(),
+                    cluster_state,
                 )
                 .map(|new_config|
                     !new_config.replica_set().is_equivalent(next.replica_set()))
@@ -596,6 +575,7 @@ impl<T: TransportConnect> Scheduler<T> {
                 nodes_config,
                 default_replication.clone(),
                 NodeSet::default(),
+                cluster_state,
             )
             .map(|new_config| {
                 !new_config
@@ -610,10 +590,10 @@ impl<T: TransportConnect> Scheduler<T> {
         nodes_config: &NodesConfiguration,
         partition_replication: ReplicationProperty,
         preferred_nodes: NodeSet,
+        cluster_state: &ClusterState,
     ) -> Option<PartitionConfiguration> {
         let options =
             SelectorOptions::new(u64::from(partition_id)).with_preferred_nodes(preferred_nodes);
-        let cluster_state = TaskCenter::with_current(|tc| tc.cluster_state().clone());
         let filter = |node_id: PlainNodeId, node_config: &NodeConfig| {
             cluster_state.is_alive(node_id.into()) && worker_candidate_filter(node_id, node_config)
         };
@@ -634,35 +614,26 @@ impl<T: TransportConnect> Scheduler<T> {
     /// Selects a leader based on the current target leader, observed cluster state and preferred leader.
     ///
     /// 1. Prefer worker nodes that are caught up
-    ///    2.1 Choose the current target leader
-    ///    2.2 Choose the preferred leader
-    ///    2.3 Pick any of the nodes in the current partition configuration
     /// 2. Pick worker nodes that are alive
     fn select_leader(
         &mut self,
         partition_id: &PartitionId,
-        observed_cluster_state: &ObservedClusterState,
+        cluster_state: &ClusterState,
+        legacy_cluster_state: &LegacyClusterState,
     ) {
         let Some(partition) = self.partitions.get_mut(partition_id) else {
             return;
         };
 
-        if let Some(observed_partition_state) = observed_cluster_state.partition_state(partition_id)
-        {
-            if let Some(leader) =
-                Self::select_leader_by_priority(partition, observed_cluster_state, |node_id| {
-                    observed_partition_state
-                        .replay_status(&node_id)
-                        .is_some_and(|status| status == ReplayStatus::Active)
-                })
-            {
-                partition.target_leader = Some(leader);
-                return;
-            }
+        if let Some(leader) = Self::select_leader_by_priority(partition, cluster_state, |node_id| {
+            legacy_cluster_state.is_partition_processor_active(partition_id, &node_id)
+        }) {
+            partition.target_leader = Some(leader);
+            return;
         }
 
         if let Some(leader) =
-            Self::select_leader_by_priority(partition, observed_cluster_state, |_node_id| true)
+            Self::select_leader_by_priority(partition, cluster_state, |_node_id| true)
         {
             partition.target_leader = Some(leader);
         }
@@ -672,7 +643,7 @@ impl<T: TransportConnect> Scheduler<T> {
 
     fn select_leader_by_priority(
         partition: &PartitionState,
-        observed_cluster_state: &ObservedClusterState,
+        cluster_state: &ClusterState,
         additional_criterion: impl Fn(PlainNodeId) -> bool,
     ) -> Option<PlainNodeId> {
         // select any of the alive nodes in current
@@ -683,8 +654,7 @@ impl<T: TransportConnect> Scheduler<T> {
                 .iter()
                 .copied()
                 .find(|node_id| {
-                    observed_cluster_state.alive_generation(*node_id).is_some()
-                        && additional_criterion(*node_id)
+                    cluster_state.is_alive(NodeId::from(*node_id)) && additional_criterion(*node_id)
                 })
         {
             return Some(alive_replica);
@@ -693,66 +663,11 @@ impl<T: TransportConnect> Scheduler<T> {
         None
     }
 
-    fn update_placement(&self, partition_id: &PartitionId, placement: &mut PartitionPlacement) {
-        if let Some(partition) = self.partitions.get(partition_id) {
-            if let Some(leader) = partition.target_leader {
-                // a bit wasteful to create new nodesets over and over again if nothing changes; but
-                // it's hopefully not for too long
-                *placement = partition.replicas().cloned().collect();
-                placement.set_leader(leader);
-            } else {
-                placement.clear();
-            }
-        }
-    }
-
-    #[instrument(skip_all)]
-    async fn try_update_partition_table(
-        &mut self,
-        previous_version: Version,
-        partition_table: PartitionTable,
-    ) -> Result<(), Error> {
-        let new_version = partition_table.version();
-        match self
-            .metadata_writer
-            .global_metadata()
-            .put(
-                partition_table.into(),
-                Precondition::MatchesVersion(previous_version),
-            )
-            .log_slow_after(
-                Duration::from_secs(1),
-                Level::DEBUG,
-                format!("Updating partition table to version {new_version}"),
-            )
-            .with_overdue(Duration::from_secs(3), tracing::Level::INFO)
-            .await
-        {
-            Ok(_) => {
-                debug!("Partition table {new_version} has been written to metadata store",);
-            }
-            Err(WriteError::FailedPrecondition(err)) => {
-                info!(
-                    err,
-                    "Write partition table to metadata store was rejected due to version conflict, \
-                        this is benign unless it's happening repeatedly. In such case, we might be in \
-                        a tight race with another admin node"
-                );
-                // There is no need to wait for the partition table to synchronize.
-                // The update_partition_placement will get called again anyway once
-                // the partition table is updated.
-            }
-            Err(err) => return Err(err.into()),
-        }
-
-        Ok(())
-    }
-
-    fn instruct_nodes(&self, observed_cluster_state: &ObservedClusterState) -> Result<(), Error> {
+    fn instruct_nodes(&self, legacy_cluster_state: &LegacyClusterState) -> Result<(), Error> {
         let mut commands = BTreeMap::default();
 
         for (partition_id, partition) in &self.partitions {
-            partition.generate_instructions(partition_id, observed_cluster_state, &mut commands);
+            partition.generate_instructions(partition_id, legacy_cluster_state, &mut commands);
         }
 
         if !commands.is_empty() {

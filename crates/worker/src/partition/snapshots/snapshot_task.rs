@@ -11,6 +11,7 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+use restate_types::nodes_config::ClusterFingerprint;
 use tracing::{debug, info, instrument, warn};
 
 use restate_core::worker_api::{SnapshotError, SnapshotErrorKind};
@@ -31,25 +32,27 @@ pub struct SnapshotPartitionTask {
     pub snapshot_base_path: PathBuf,
     pub partition_store_manager: PartitionStoreManager,
     pub cluster_name: String,
+    pub cluster_fingerprint: Option<ClusterFingerprint>,
     pub node_name: String,
     pub snapshot_repository: SnapshotRepository,
 }
 
 impl SnapshotPartitionTask {
-    #[instrument(level = "info", skip_all, fields(snapshot_id = %self.snapshot_id, partition_id = %self.partition_id))]
+    #[instrument(
+        name = "create-snapshot",
+        level = "error",
+        skip_all,
+        fields(partition_id = %self.partition_id, snapshot_id = %self.snapshot_id)
+    )]
     pub async fn run(self) -> Result<PartitionSnapshotMetadata, SnapshotError> {
         debug!("Creating partition snapshot");
         self.create_snapshot_inner()
             .await
             .inspect(|metadata| {
-                info!(
-                    archived_lsn = %metadata.min_applied_lsn,
-                    snapshot_id = %metadata.snapshot_id,
-                    "Created partition snapshot"
-                );
+                info!(archived_lsn = %metadata.min_applied_lsn, "Created partition snapshot");
             })
             .inspect_err(|err| {
-                warn!("Failed to create partition snapshot: {}", err);
+                warn!("Create snapshot failed: {}", err);
             })
     }
 
@@ -85,12 +88,13 @@ impl SnapshotPartitionTask {
         PartitionSnapshotMetadata {
             version: SnapshotFormatVersion::V1,
             cluster_name: self.cluster_name.clone(),
+            cluster_fingerprint: self.cluster_fingerprint,
             node_name: self.node_name.clone(),
             partition_id: self.partition_id,
             created_at: humantime::Timestamp::from(created_at),
             snapshot_id: self.snapshot_id,
             key_range: snapshot.key_range.clone(),
-            log_id: Some(snapshot.log_id),
+            log_id: snapshot.log_id,
             min_applied_lsn: snapshot.min_applied_lsn,
             db_comparator_name: snapshot.db_comparator_name.clone(),
             files: snapshot.files.clone(),

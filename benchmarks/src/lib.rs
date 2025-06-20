@@ -22,7 +22,7 @@ use restate_rocksdb::RocksDbManager;
 use restate_tracing_instrumentation::prometheus_metrics::Prometheus;
 use restate_types::config::{
     BifrostOptionsBuilder, CommonOptionsBuilder, Configuration, ConfigurationBuilder,
-    MetadataServerKind, MetadataServerOptionsBuilder, WorkerOptionsBuilder,
+    MetadataServerOptionsBuilder, WorkerOptionsBuilder,
 };
 use restate_types::config_loader::ConfigLoaderBuilder;
 use restate_types::live::Constant;
@@ -158,7 +158,7 @@ pub fn flamegraph_options<'a>() -> Options<'a> {
 
 pub fn restate_configuration() -> Configuration {
     let common_options = CommonOptionsBuilder::default()
-        .base_dir(tempfile::tempdir().expect("tempdir failed").into_path())
+        .base_dir(tempfile::tempdir().expect("tempdir failed").keep())
         .default_num_partitions(10)
         .build()
         .expect("building common options should work");
@@ -168,7 +168,6 @@ pub fn restate_configuration() -> Configuration {
         .expect("building worker options should work");
 
     let metadata_server_options = MetadataServerOptionsBuilder::default()
-        .kind(Some(MetadataServerKind::Raft))
         .build()
         .expect("building metadata server options should work");
 
