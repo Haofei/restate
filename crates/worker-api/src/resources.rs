@@ -25,7 +25,7 @@ pub enum ResourceManagerUpdate {
     /// A batch of rule mutations to apply in order. Carries `Vec` rather
     /// than a single `RuleUpdate` so initial seeding and bulk rule-book
     /// diffs can ship as one channel message.
-    RulesUpdated(Vec<RuleUpdate>),
+    RulesUpdated(Box<[RuleUpdate]>),
 }
 
 pub enum UserPermitKind {

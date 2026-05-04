@@ -236,7 +236,7 @@ impl RuleBook {
     /// - Visible in both with equal per-rule `version` emits nothing.
     ///
     /// `last_modified` and `reason` never produce updates on their own.
-    pub fn diff(&self, previous: &Self) -> Vec<RuleUpdate> {
+    pub fn diff(&self, previous: &Self) -> Box<[RuleUpdate]> {
         let mut updates = Vec::new();
 
         let mut removals: HashSet<_> = previous.rules.keys().collect();
@@ -292,13 +292,27 @@ impl RuleBook {
             }
         }
 
-        updates
+        updates.into_boxed_slice()
     }
 
     /// Produce the diff as if `self` were applied on top of an empty book.
     /// Used by consumers that need to seed their runtime state on bootstrap.
-    pub fn diff_from_empty(&self) -> Vec<RuleUpdate> {
+    pub fn diff_from_empty(&self) -> Box<[RuleUpdate]> {
         self.diff(&Self::empty())
+    }
+
+    /// Encode the rule book as bilrost-encoded bytes. Used by callers that
+    /// want to embed the book in another wire format opaquely (e.g. the
+    /// `Command::UpsertRuleBook` envelope) without taking a direct
+    /// dependency on the `bilrost` crate.
+    pub fn bilrost_encode_to_bytes(&self) -> bytes::Bytes {
+        bilrost::Message::encode_to_bytes(self)
+    }
+
+    /// Decode a rule book from bilrost-encoded bytes. Inverse of
+    /// [`Self::bilrost_encode_to_bytes`].
+    pub fn bilrost_decode<B: bytes::Buf>(buf: B) -> Result<Self, bilrost::DecodeError> {
+        <Self as bilrost::OwnedMessage>::decode(buf)
     }
 
     /// Test/internal helper.
@@ -384,6 +398,37 @@ impl Default for RuleBook {
 impl Versioned for RuleBook {
     fn version(&self) -> Version {
         self.version
+    }
+}
+
+mod storage {
+    use bytes::BytesMut;
+
+    use restate_types::storage::{
+        StorageCodecKind, StorageDecode, StorageDecodeError, StorageEncode, StorageEncodeError,
+        decode, encode,
+    };
+
+    use super::RuleBook;
+
+    impl StorageEncode for RuleBook {
+        fn encode(&self, buf: &mut BytesMut) -> Result<(), StorageEncodeError> {
+            encode::encode_bilrost(self, buf)
+        }
+
+        fn default_codec(&self) -> StorageCodecKind {
+            StorageCodecKind::Bilrost
+        }
+    }
+
+    impl StorageDecode for RuleBook {
+        fn decode<B: bytes::Buf>(
+            buf: &mut B,
+            kind: StorageCodecKind,
+        ) -> Result<Self, StorageDecodeError> {
+            assert_eq!(kind, StorageCodecKind::Bilrost);
+            decode::decode_bilrost(buf)
+        }
     }
 }
 

@@ -17,10 +17,7 @@ use std::time::Duration;
 use hashbrown::HashMap;
 use metrics::counter;
 use pin_project::pin_project;
-use slotmap::SlotMap;
-use tokio::time::Instant;
-use tracing::{info, trace, warn};
-
+use restate_limiter::RuleUpdate;
 use restate_storage_api::StorageError;
 use restate_storage_api::vqueue_table::EntryKey;
 use restate_storage_api::vqueue_table::VQueueStore;
@@ -28,6 +25,9 @@ use restate_types::identifiers::PartitionKey;
 use restate_types::vqueues::VQueueId;
 use restate_types::{LockName, Scope};
 use restate_worker_api::UserLimitCounterEntry;
+use slotmap::SlotMap;
+use tokio::time::Instant;
+use tracing::{info, trace, warn};
 
 use crate::EventDetails;
 use crate::VQueueEvent;
@@ -241,6 +241,11 @@ impl<S: VQueueStore> DRRScheduler<S> {
             self.eligible.remove(handle);
         }
         Some(permit.build(&self.resource_manager))
+    }
+
+    /// Forward a batch of rule-book updates to the embedded resource manager.
+    pub fn on_rules_updated(&self, updates: Box<[RuleUpdate]>) {
+        self.resource_manager.on_rules_updated(updates);
     }
 
     #[tracing::instrument(skip_all)]

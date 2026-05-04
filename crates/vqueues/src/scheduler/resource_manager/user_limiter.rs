@@ -284,8 +284,13 @@ impl UserLimiter {
     ///
     /// This uses soft enforcement: existing permits that exceed new lower limits are not revoked;
     /// the system simply stops issuing new permits until usage drains below the new limit.
-    pub(super) fn apply_rule_updates(&mut self, updates: Vec<RuleUpdate>) -> Vec<VQueueHandle> {
-        let mut woken = Vec::new();
+    pub(super) fn apply_rule_updates(
+        &mut self,
+        updates: impl IntoIterator<Item = RuleUpdate>,
+    ) -> Vec<VQueueHandle> {
+        // allocate a fairly large sized vec to avoid frequent re-allocations when adding the woken
+        // vqueues
+        let mut woken = Vec::with_capacity(1024);
         for update in updates {
             // Apply the mutation to the rules store, capturing the pattern for the
             // subsequent waiter-drain pass.
