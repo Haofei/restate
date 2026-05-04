@@ -113,6 +113,17 @@ pub struct WorkerOptions {
     ///
     /// Default is 256 MiB.
     pub data_service_memory_limit: NonZeroByteCount,
+
+    /// # Rule book poll interval
+    ///
+    /// How often each node's `RuleBookCache` polls the metadata store
+    /// for rule-book updates. The cache also receives push-style
+    /// notifications when partition processors apply
+    /// `Command::UpsertRuleBook` from Bifrost, so this poll interval
+    /// is mainly a fallback for cross-node propagation when no
+    /// partition leader has yet observed the change. Default: 30 s.
+    /// *Since v1.7.0*
+    pub rule_book_poll_interval: NonZeroFriendlyDuration,
 }
 
 impl WorkerOptions {
@@ -173,6 +184,7 @@ impl Default for WorkerOptions {
             data_service_memory_limit: NonZeroByteCount::new(
                 NonZeroUsize::new(256 * 1024 * 1024).unwrap(),
             ),
+            rule_book_poll_interval: NonZeroFriendlyDuration::from_secs_unchecked(30),
         }
     }
 }
