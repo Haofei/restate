@@ -8,6 +8,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::error_handling::HandleErrorLayer;
@@ -52,7 +53,7 @@ pub struct AdminService<Metadata, Discovery, Telemetry, Invocations, Transport> 
     invocation_client: Invocations,
     query_context: Option<restate_storage_query_datafusion::context::QueryContext>,
     metadata_client: MetadataStoreClient,
-    rule_book_observer: Option<RuleBookObserver>,
+    rule_book_observer: Option<Arc<dyn RuleBookObserver>>,
 }
 
 impl<Invocations, Transport>
@@ -97,7 +98,7 @@ where
         }
     }
 
-    pub fn with_rule_book_observer(self, observer: RuleBookObserver) -> Self {
+    pub fn with_rule_book_observer(self, observer: Arc<dyn RuleBookObserver>) -> Self {
         Self {
             rule_book_observer: Some(observer),
             ..self

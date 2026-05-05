@@ -28,6 +28,14 @@ pub const MAX_RULES_PER_BOOK: usize = 10_000;
 
 /// One persisted rule entry. Keyed by its [`RulePattern`] in the
 /// owning [`RuleBook`].
+///
+/// `version` advances on runtime-relevant changes only (`limits`,
+/// `disabled`). Edits to `description` bump the enclosing [`RuleBook::version`].
+/// See [`RuleBook::apply_change`] for the full version-bump contract.
+///
+/// `disabled` (rather than `enabled`) is the field name so the common case
+/// — an active rule — corresponds to bilrost's empty state for `bool`
+/// (`false`) and gets omitted from the wire.
 #[derive(Debug, Clone, PartialEq, Eq, bilrost::Message)]
 pub struct PersistedRule {
     /// Per-rule version. Advances on runtime-relevant changes
@@ -37,10 +45,9 @@ pub struct PersistedRule {
     pub version: Version,
     #[bilrost(tag(3))]
     pub limits: UserLimits,
-    /// Operator-supplied note explaining why the rule was created or
-    /// modified.
+    /// Free-form operator-supplied description for the rule.
     #[bilrost(tag(4))]
-    pub reason: Option<String>,
+    pub description: Option<String>,
     /// Soft tombstone. `true` parks the rule so the runtime treats it
     /// as absent without removing the persisted entry.
     #[bilrost(tag(5))]
@@ -59,7 +66,13 @@ pub struct PersistedRule {
 /// Takes the book by value: the cache only allocates an `Arc` for it
 /// on the newer-version branch, so admin handlers don't have to
 /// pre-wrap their result.
-pub type RuleBookObserver = Arc<dyn Fn(RuleBook) + Send + Sync>;
+pub trait RuleBookObserver: Send + Sync {
+    /// Notify a newly observed rule book.
+    fn notify_observed(&self, rule_book: RuleBook);
+
+    /// Obtain the last known rule book
+    fn get(&self) -> Arc<RuleBook>;
+}
 
 /// The cluster-wide rule book.
 ///
@@ -156,7 +169,7 @@ impl RuleBook {
                                 Some(PersistedRule {
                                     version: new_book_version,
                                     limits: upsert.limits,
-                                    reason: upsert.reason,
+                                    description: upsert.description,
                                     disabled: upsert.disabled,
                                     last_modified: now,
                                 }),
@@ -166,7 +179,7 @@ impl RuleBook {
                             let runtime_changed = existing.limits != upsert.limits
                                 || existing.disabled != upsert.disabled;
                             let anything_changed =
-                                runtime_changed || existing.reason != upsert.reason;
+                                runtime_changed || existing.description != upsert.description;
                             if anything_changed {
                                 let (new_version, last_modified) = if runtime_changed {
                                     (existing.version.next(), now)
@@ -178,7 +191,7 @@ impl RuleBook {
                                     Some(PersistedRule {
                                         version: new_version,
                                         limits: upsert.limits,
-                                        reason: upsert.reason,
+                                        description: upsert.description,
                                         disabled: upsert.disabled,
                                         last_modified,
                                     }),
@@ -246,7 +259,7 @@ impl RuleBook {
     ///   "anything runtime-relevant changed").
     /// - Visible in both with equal per-rule `version` emits nothing.
     ///
-    /// `last_modified` and `reason` never produce updates on their own.
+    /// `last_modified` and `description` never produce updates on their own.
     pub fn diff(&self, previous: &Self) -> Box<[RuleUpdate]> {
         let mut updates = Vec::new();
 
@@ -341,7 +354,7 @@ impl RuleBook {
 #[derive(Debug, Clone)]
 pub struct RuleUpsert {
     pub limits: UserLimits,
-    pub reason: Option<String>,
+    pub description: Option<String>,
     /// Default `false` (rule is active). Set to `true` to write a parked
     /// rule that is invisible to the runtime until later toggled.
     pub disabled: bool,
@@ -471,7 +484,7 @@ mod tests {
             limits: UserLimits {
                 action_concurrency: NonZeroU32::new(concurrency),
             },
-            reason: None,
+            description: None,
             disabled: false,
             precondition: Precondition::None,
         }
@@ -504,7 +517,7 @@ mod tests {
                 limits: UserLimits {
                     action_concurrency: NonZeroU32::new(1000),
                 },
-                reason: Some("global default".to_owned()),
+                description: Some("global default".to_owned()),
                 disabled: false,
                 last_modified: MillisSinceEpoch::new(42),
                 version: Version::from(1),
@@ -516,7 +529,7 @@ mod tests {
                 limits: UserLimits {
                     action_concurrency: NonZeroU32::new(10),
                 },
-                reason: None,
+                description: None,
                 disabled: true,
                 last_modified: MillisSinceEpoch::new(43),
                 version: Version::from(2),
@@ -570,13 +583,13 @@ mod tests {
         book.apply_change(
             pat("*"),
             RuleChange::Upsert(RuleUpsert {
-                reason: Some("vendor X paused".to_owned()),
+                description: Some("vendor X paused".to_owned()),
                 ..upsert(1000)
             }),
         )
         .unwrap();
         let r = book.get(&pat("*")).unwrap();
-        assert_eq!(r.reason.as_deref(), Some("vendor X paused"));
+        assert_eq!(r.description.as_deref(), Some("vendor X paused"));
         assert_eq!(r.version, v_before_rule, "per-rule version must NOT bump");
         assert_eq!(
             book.version(),
@@ -998,7 +1011,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_reason_only_change_emits_nothing() {
+    fn diff_description_only_change_emits_nothing() {
         let mut book = RuleBook::empty();
         book.apply_change(pat("*"), RuleChange::Upsert(upsert(1000)))
             .unwrap();
@@ -1006,7 +1019,7 @@ mod tests {
         book.apply_change(
             pat("*"),
             RuleChange::Upsert(RuleUpsert {
-                reason: Some("audit note".to_owned()),
+                description: Some("audit note".to_owned()),
                 ..upsert(1000)
             }),
         )

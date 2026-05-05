@@ -94,7 +94,7 @@ impl<T: TransportConnect> AdminRole<T> {
         server_builder: &mut NetworkServerBuilder,
         address_book: &mut AddressBook,
         local_query_context: Option<QueryContext>,
-        local_rule_book_observer: Option<RuleBookObserver>,
+        local_rule_book_observer: Option<Arc<dyn RuleBookObserver>>,
     ) -> Result<Self, AdminRoleBuildError> {
         health_status.update(AdminStatus::StartingUp);
         let config = updateable_config.pinned();

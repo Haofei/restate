@@ -16,6 +16,7 @@ use restate_service_protocol_v4::serdes::SerdesClient;
 use restate_storage_query_datafusion::context::QueryContext;
 use restate_types::schema::registry::SchemaRegistry;
 use restate_wal_protocol::Envelope;
+use std::sync::Arc;
 
 #[derive(Clone, derive_builder::Builder)]
 pub struct AdminServiceState<Metadata, Discovery, Telemetry, Invocations, Transport> {
@@ -28,7 +29,7 @@ pub struct AdminServiceState<Metadata, Discovery, Telemetry, Invocations, Transp
     pub metadata_store_client: MetadataStoreClient,
     // Some value if the query endpoint is activated
     pub query_context: Option<QueryContext>,
-    pub rule_book_observer: Option<RuleBookObserver>,
+    pub rule_book_observer: Option<Arc<dyn RuleBookObserver>>,
 }
 
 impl<Metadata, Discovery, Telemetry, Invocations, Transport>
@@ -43,7 +44,7 @@ where
         ingestion_client: IngestionClient<Transport, Envelope>,
         metadata_store_client: MetadataStoreClient,
         query_context: Option<QueryContext>,
-        rule_book_observer: Option<RuleBookObserver>,
+        rule_book_observer: Option<Arc<dyn RuleBookObserver>>,
     ) -> Self {
         Self {
             schema_registry,

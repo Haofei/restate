@@ -23,12 +23,12 @@ pub(crate) fn append_rule_row(
     if let Some(concurrency) = rule.limits.action_concurrency {
         row.action_concurrency(concurrency.get());
     }
-    if let Some(reason) = rule.reason.as_deref() {
-        row.reason(reason);
+    if let Some(description) = rule.description.as_deref() {
+        row.description(description);
     }
     row.disabled(rule.disabled);
     row.version(rule.version.into());
-    if let Ok(last_modified) = i64::try_from(rule.last_modified.as_unix_millis().as_u64()) {
+    if let Ok(last_modified) = i64::try_from(rule.last_modified.as_u64()) {
         row.last_modified(last_modified);
     }
 }

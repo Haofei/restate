@@ -175,7 +175,7 @@ pub struct UserTables<P, S, D> {
     schemas: Live<D>,
     remote_scanner_manager: RemoteScannerManager,
     metadata_store_client: MetadataStoreClient,
-    rule_book_observer: Option<RuleBookObserver>,
+    rule_book_observer: Option<Arc<dyn RuleBookObserver>>,
 }
 
 impl<P, S, D> UserTables<P, S, D> {
@@ -187,7 +187,7 @@ impl<P, S, D> UserTables<P, S, D> {
         schemas: Live<D>,
         remote_scanner_manager: RemoteScannerManager,
         metadata_store_client: MetadataStoreClient,
-        rule_book_observer: Option<RuleBookObserver>,
+        rule_book_observer: Option<Arc<dyn RuleBookObserver>>,
     ) -> Self {
         Self {
             partition_selector,
@@ -410,7 +410,7 @@ impl QueryContext {
         >,
         remote_scanner_manager: RemoteScannerManager,
         metadata_store_client: MetadataStoreClient,
-        rule_book_observer: Option<RuleBookObserver>,
+        rule_book_observer: Option<Arc<dyn RuleBookObserver>>,
     ) -> Result<QueryContext, BuildError> {
         let tables = UserTables::new(
             partition_selector,
