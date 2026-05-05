@@ -353,6 +353,12 @@ pub enum RuleChange {
 /// - [`Precondition::DoesNotExist`] requires the rule to be absent.
 ///   Combined with `Upsert` this is a pure insert.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+#[cfg_attr(
+    feature = "serde",
+    serde(tag = "type", content = "version", rename_all = "snake_case")
+)]
 pub enum Precondition {
     #[default]
     None,
