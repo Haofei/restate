@@ -11,6 +11,7 @@
 //! Persistent, versioned rule book that backs the in-memory [`crate::Rules`] store.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use restate_clock::time::MillisSinceEpoch;
 use restate_types::{Version, Versioned};
@@ -49,6 +50,16 @@ pub struct PersistedRule {
     #[bilrost(tag(6))]
     pub last_modified: MillisSinceEpoch,
 }
+
+/// Fire-and-forget callback that pushes a freshly written rule book
+/// into a co-located worker's `RuleBookCache`. `None` on admin-only
+/// nodes; the worker then learns about updates via its metadata-store
+/// poll loop instead.
+///
+/// Takes the book by value: the cache only allocates an `Arc` for it
+/// on the newer-version branch, so admin handlers don't have to
+/// pre-wrap their result.
+pub type RuleBookObserver = Arc<dyn Fn(RuleBook) + Send + Sync>;
 
 /// The cluster-wide rule book.
 ///
@@ -446,9 +457,8 @@ restate_encoding::bilrost_as_display_from_str!(RulePattern<ReString>);
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU64;
-
     use bilrost::{Message, OwnedMessage};
+    use std::num::NonZeroU32;
 
     use super::*;
 
@@ -456,10 +466,10 @@ mod tests {
         s.parse().unwrap()
     }
 
-    fn upsert(concurrency: u64) -> RuleUpsert {
+    fn upsert(concurrency: u32) -> RuleUpsert {
         RuleUpsert {
             limits: UserLimits {
-                action_concurrency: NonZeroU64::new(concurrency),
+                action_concurrency: NonZeroU32::new(concurrency),
             },
             reason: None,
             disabled: false,
@@ -492,7 +502,7 @@ mod tests {
             pat("*"),
             PersistedRule {
                 limits: UserLimits {
-                    action_concurrency: NonZeroU64::new(1000),
+                    action_concurrency: NonZeroU32::new(1000),
                 },
                 reason: Some("global default".to_owned()),
                 disabled: false,
@@ -504,7 +514,7 @@ mod tests {
             pat("scope1/*/tenant1"),
             PersistedRule {
                 limits: UserLimits {
-                    action_concurrency: NonZeroU64::new(10),
+                    action_concurrency: NonZeroU32::new(10),
                 },
                 reason: None,
                 disabled: true,
@@ -530,7 +540,7 @@ mod tests {
         let r = book.get(&pat("*")).unwrap();
         assert_eq!(r.version, Version::from(1));
         assert!(!r.disabled);
-        assert_eq!(r.limits.action_concurrency, NonZeroU64::new(1000));
+        assert_eq!(r.limits.action_concurrency, NonZeroU32::new(1000));
     }
 
     #[test]
@@ -544,7 +554,7 @@ mod tests {
         book.apply_change(pat("*"), RuleChange::Upsert(upsert(500)))
             .unwrap();
         let r = book.get(&pat("*")).unwrap();
-        assert_eq!(r.limits.action_concurrency, NonZeroU64::new(500));
+        assert_eq!(r.limits.action_concurrency, NonZeroU32::new(500));
         assert_eq!(r.version, v_before_rule.next());
         assert_eq!(book.version(), v_before_book.next());
     }
@@ -668,7 +678,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             book.get(&pat("*")).unwrap().limits.action_concurrency,
-            NonZeroU64::new(500)
+            NonZeroU32::new(500)
         );
     }
 
@@ -728,7 +738,7 @@ mod tests {
         book.apply_change(pat("*"), RuleChange::Upsert(upsert(1000)))
             .unwrap();
         // bump the rule a few times
-        for i in 1u64..=3 {
+        for i in 1u32..=3 {
             book.apply_change(pat("*"), RuleChange::Upsert(upsert(1000 + i)))
                 .unwrap();
         }
@@ -928,7 +938,7 @@ mod tests {
         let updates = book.diff(&prev);
         assert_eq!(updates_summary(&updates), vec![("*".to_owned(), "upsert")]);
         if let RuleUpdate::Upsert { limit, .. } = &updates[0] {
-            assert_eq!(limit.action_concurrency, NonZeroU64::new(500));
+            assert_eq!(limit.action_concurrency, NonZeroU32::new(500));
         }
     }
 
