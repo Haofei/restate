@@ -66,6 +66,7 @@ impl RuleBookCacheHandle {
     /// Detached handle used by tests and benchmarks. The associated
     /// watch has no polling task, so `notify_observed` and
     /// `subscribe` work but no metadata-store traffic occurs.
+    #[cfg(any(test, feature = "test-util"))]
     pub fn detached() -> Self {
         let (sender, _) = watch::channel(Arc::new(RuleBook::default()));
         Self { sender }

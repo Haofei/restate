@@ -27,7 +27,7 @@ restate-tracing-instrumentation = { workspace = true, features = ["rt-tokio"] }
 restate-types = { workspace = true, features = ["clap"] }
 restate-vqueues = { workspace = true }
 restate-wal-protocol = { workspace = true }
-restate-worker = { workspace = true, features = ["expose-internals"] }
+restate-worker = { workspace = true, features = ["test-util"] }
 
 anyhow = { workspace = true }
 axum = { workspace = true, features = ["tokio", "http1"] }
