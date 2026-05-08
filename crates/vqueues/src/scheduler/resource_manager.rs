@@ -29,6 +29,7 @@ use restate_limiter::RuleUpdate;
 use restate_memory::{MemoryPool, NonZeroByteCount};
 use restate_storage_api::StorageError;
 use restate_storage_api::lock_table::LoadLocks;
+use restate_storage_api::vqueue_table::metadata::VQueueMeta;
 use restate_storage_api::vqueue_table::{EntryKey, EntryMetadata};
 use restate_types::identifiers::PartitionKey;
 use restate_types::vqueues::EntryKind;
@@ -45,7 +46,6 @@ use self::permit::ProvisionalPermit;
 use self::user_limiter::UserLimiter;
 use super::VQueueHandle;
 use super::eligible::EligibilityTracker;
-use super::queue_meta::VQueueMetaLite;
 use crate::GlobalTokenBucket;
 
 // A set of queues waiting on a resource
@@ -136,19 +136,17 @@ impl ResourceManager {
         eligible: &mut EligibilityTracker,
         scope: &Option<Scope>,
         lock_name: &LockName,
-    ) -> bool {
+    ) {
         trace!("[release_lock] scope: {scope:?}, lock_name: {lock_name}");
 
         let Some(queues) = self.locks.release_lock(scope, lock_name) else {
-            return false;
+            return;
         };
 
-        let mut wake_up = false;
         for queue in queues {
             // notify the scheduler that those queues should be woken up.
-            wake_up |= eligible.wake_up_queue(queue);
+            eligible.wake_up_queue(queue);
         }
-        wake_up
     }
 
     /// Reverts will release the lock if the user permit has one
@@ -156,17 +154,16 @@ impl ResourceManager {
         &mut self,
         eligible: &mut EligibilityTracker,
         builder: PermitBuilder,
-    ) -> bool {
+    ) {
         let Some(permit) = builder.into_user_permit() else {
-            return false;
+            return;
         };
 
-        let mut wake_up = false;
         // Release the lock if we have one held
         if let Some(lock) = permit.lock
             && let Some(queues) = self.locks.release_lock(&lock.scope, &lock.lock_name)
         {
-            wake_up |= eligible.wake_up_queues(queues);
+            eligible.wake_up_queues(queues);
         }
 
         for resource in permit.resources {
@@ -175,19 +172,17 @@ impl ResourceManager {
                     let woken = self
                         .user_limiter
                         .release_action_concurrency(&scope, &limit_key);
-                    wake_up |= eligible.wake_up_queues(woken);
+                    eligible.wake_up_queues(woken);
                 }
             }
         }
-
-        wake_up
     }
 
     pub(super) fn poll_acquire_permit(
         &mut self,
         cx: &mut std::task::Context<'_>,
         vqueue: VQueueHandle,
-        meta: &VQueueMetaLite,
+        meta: &VQueueMeta,
         key: &EntryKey,
         _metadata: &EntryMetadata,
         current_permit: &mut PermitBuilder,
