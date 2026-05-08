@@ -10,12 +10,12 @@
 
 mod entry;
 mod inbox;
+mod inbox_reader;
 mod input;
 mod key_codec;
 mod metadata;
 mod reader;
 mod running_reader;
-mod waiting_reader;
 
 use std::io::Cursor;
 
