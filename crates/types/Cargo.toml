@@ -68,7 +68,6 @@ indexmap = { workspace = true, features = ["serde"] }
 itertools = { workspace = true }
 jsonschema = { workspace = true }
 listenfd = { version = "1" }
-metrics = { workspace = true }
 moka = { workspace = true, features = ["sync", "logging"] }
 notify = { version = "8.2.0" }
 notify-debouncer-full = { version = "0.6" }
@@ -83,7 +82,6 @@ prost-types = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
 regress = { version = "0.10" }
-rustc-hash = "2.1.1"
 schemars = { workspace = true, optional = true }
 semver = { workspace = true }
 serde = { workspace = true, features = ["rc"] }
