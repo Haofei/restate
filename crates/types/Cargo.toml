@@ -85,6 +85,7 @@ regress = { version = "0.10" }
 schemars = { workspace = true, optional = true }
 semver = { workspace = true }
 serde = { workspace = true, features = ["rc"] }
+serde_core = { workspace = true }
 serde_json = { workspace = true }
 serde_path_to_error = { version = "0.1" }
 serde_with = { workspace = true, features = ["json"] }

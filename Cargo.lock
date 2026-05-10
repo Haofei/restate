@@ -8564,6 +8564,7 @@ dependencies = [
  "schemars 1.2.1",
  "semver",
  "serde",
+ "serde_core",
  "serde_json",
  "serde_path_to_error",
  "serde_with",
@@ -8596,13 +8597,15 @@ dependencies = [
  "ahash",
  "bilrost",
  "bytes",
+ "bytestring",
  "compact_str",
  "hashbrown 0.16.1",
  "metrics",
  "opentelemetry",
  "restate-util-string",
  "restate-workspace-hack",
- "serde",
+ "serde_core",
+ "serde_json",
 ]
 
 [[package]]
