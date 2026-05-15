@@ -108,6 +108,9 @@ ulid = { workspace = true }
 utoipa = { workspace = true, optional = true, features = ["time"] }
 xxhash-rust = { workspace = true, features = ["xxh3"] }
 
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+sha2 = { workspace = true, features = ["asm"] }
+
 [dev-dependencies]
 restate-types = {path = ".", default-features = false, features = ["test-util"]}
 restate-test-util = { workspace = true }
