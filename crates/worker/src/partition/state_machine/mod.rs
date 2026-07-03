@@ -878,6 +878,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                 {
                     // only update if schema is none or has a smaller version
                     debug!("Schema updated to version '{}'", upsert.schema.version());
+                    self.storage.put_schema(&upsert.schema)?;
                     *self.schema = Some(upsert.schema);
                 }
 
