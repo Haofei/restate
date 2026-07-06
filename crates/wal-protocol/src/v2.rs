@@ -48,12 +48,47 @@ pub struct Header {
 }
 
 impl Header {
+    pub fn into_dedup(self) -> Dedup {
+        self.dedup
+    }
+
     pub fn dedup(&self) -> &Dedup {
         &self.dedup
     }
 
     pub fn kind(&self) -> CommandKind {
         self.kind
+    }
+
+    pub fn scope(&self) -> CommandScope {
+        match self.kind {
+            CommandKind::Unknown
+            | CommandKind::AnnounceLeader
+            | CommandKind::UpdatePartitionDurability
+            | CommandKind::VersionBarrier
+            | CommandKind::UpsertSchema
+            | CommandKind::UpsertRuleBook
+            | CommandKind::TruncateOutbox => CommandScope::PartitionScoped,
+            CommandKind::VQSchedulerDecisions
+            | CommandKind::VQueuesPause
+            | CommandKind::VQueuesResume
+            | CommandKind::PatchState
+            | CommandKind::TerminateInvocation
+            | CommandKind::PurgeInvocation
+            | CommandKind::PurgeJournal
+            | CommandKind::Invoke
+            | CommandKind::ProxyThrough
+            | CommandKind::AttachInvocation
+            | CommandKind::ResumeInvocation
+            | CommandKind::PauseInvocation
+            | CommandKind::RestartAsNewInvocation
+            | CommandKind::InvokerEffect
+            | CommandKind::Timer
+            | CommandKind::ScheduleTimer
+            | CommandKind::InvocationResponse
+            | CommandKind::NotifySignal
+            | CommandKind::NotifyGetInvocationOutputResponse => CommandScope::KeyScoped,
+        }
     }
 }
 
@@ -230,6 +265,22 @@ impl<C: Command> From<Envelope<C>> for Envelope<Raw> {
     fn from(value: Envelope<C>) -> Self {
         value.into_raw()
     }
+}
+
+/// Partitions WAL commands into two categories: Those that operate on the partition-range level
+/// (partitition-scoped) and those that operate on a single partition key (key-scoped).
+///
+/// In some cases, the actual command may be carrying a single partition key but that
+/// doesn't affect that the command is still scoped to the partition-range that starts
+/// with this partition key.
+pub enum CommandScope {
+    /// The command operates on the partition-range level. It affects the processor's state
+    /// machine rather than a single invocation, vqueue, or other key-scoped resources.
+    PartitionScoped,
+    /// The command operates on a single partition key. It affects one or more resources
+    /// that belong to a single key. Key-scoped commands are strictly isolated from commands
+    /// scoped to _different_ partition keys.
+    KeyScoped,
 }
 
 /// Enumerates the logical categories of WAL records that the partition
