@@ -56,9 +56,9 @@ fn get_outbox_head_seq_number<S: StorageAccess>(
     storage.get_first_blocking(
         TableScan::KeyRangeInclusiveInSinglePartition(partition_id, start, end),
         |kv| {
-            if let Some((k, v)) = kv {
-                let (seq_no, _) = decode_key_value(k, v)?;
-                Ok(Some(seq_no))
+            if let Some((mut k, _)) = kv {
+                let key = OutboxKey::deserialize_from(&mut k)?;
+                Ok(Some(key.message_index))
             } else {
                 Ok(None)
             }
