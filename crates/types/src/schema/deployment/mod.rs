@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::ops::RangeInclusive;
+use std::sync::Arc;
 
 use crate::config::Configuration;
 use crate::deployment::{
@@ -246,6 +247,70 @@ pub trait DeploymentResolver {
     ) -> Option<(Deployment, Vec<ServiceMetadata>)>;
 
     fn get_deployments(&self) -> Vec<(Deployment, Vec<(String, ServiceRevision)>)>;
+}
+
+impl<T: DeploymentResolver> DeploymentResolver for &T {
+    fn resolve_latest_deployment_for_service(
+        &self,
+        service_name: impl AsRef<str>,
+    ) -> Option<Deployment> {
+        (**self).resolve_latest_deployment_for_service(service_name)
+    }
+
+    fn find_deployment(
+        &self,
+        deployment_address: &DeploymentAddress,
+        additional_headers: &Headers,
+    ) -> Option<(Deployment, Vec<ServiceMetadata>)> {
+        (**self).find_deployment(deployment_address, additional_headers)
+    }
+
+    fn get_deployment(&self, deployment_id: &DeploymentId) -> Option<Deployment> {
+        (**self).get_deployment(deployment_id)
+    }
+
+    fn get_deployment_and_services(
+        &self,
+        deployment_id: &DeploymentId,
+    ) -> Option<(Deployment, Vec<ServiceMetadata>)> {
+        (**self).get_deployment_and_services(deployment_id)
+    }
+
+    fn get_deployments(&self) -> Vec<(Deployment, Vec<(String, ServiceRevision)>)> {
+        (**self).get_deployments()
+    }
+}
+
+impl<T: DeploymentResolver> DeploymentResolver for Arc<T> {
+    fn resolve_latest_deployment_for_service(
+        &self,
+        service_name: impl AsRef<str>,
+    ) -> Option<Deployment> {
+        (**self).resolve_latest_deployment_for_service(service_name)
+    }
+
+    fn find_deployment(
+        &self,
+        deployment_address: &DeploymentAddress,
+        additional_headers: &Headers,
+    ) -> Option<(Deployment, Vec<ServiceMetadata>)> {
+        (**self).find_deployment(deployment_address, additional_headers)
+    }
+
+    fn get_deployment(&self, deployment_id: &DeploymentId) -> Option<Deployment> {
+        (**self).get_deployment(deployment_id)
+    }
+
+    fn get_deployment_and_services(
+        &self,
+        deployment_id: &DeploymentId,
+    ) -> Option<(Deployment, Vec<ServiceMetadata>)> {
+        (**self).get_deployment_and_services(deployment_id)
+    }
+
+    fn get_deployments(&self) -> Vec<(Deployment, Vec<(String, ServiceRevision)>)> {
+        (**self).get_deployments()
+    }
 }
 
 mod serde_hacks {
