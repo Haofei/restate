@@ -96,9 +96,8 @@ use restate_worker_api::{LeaderQueryCommand, LeaderQueryReceiver};
 
 use self::leadership::trim_queue::TrimQueue;
 use crate::metric_definitions::{
-    FLARE_REASON_VERSION_BARRIER, LEADER_LABEL, LEADER_LABEL_FOLLOWER, LEADER_LABEL_LEADER,
-    PARTITION_BLOCKED_FLARE, PARTITION_LABEL, PARTITION_RECORD_COMMITTED_TO_READ_LATENCY_SECONDS,
-    REASON_LABEL,
+    FLARE_REASON_VERSION_BARRIER, LEADER_LABEL, LEADER_LABEL_LEADER, PARTITION_BLOCKED_FLARE,
+    PARTITION_LABEL, PARTITION_RECORD_COMMITTED_TO_READ_LATENCY_SECONDS, REASON_LABEL,
 };
 use crate::partition::leadership::LeadershipState;
 use crate::partition::state_machine::{ActionCollector, StateMachine};
@@ -579,10 +578,11 @@ where
         let mut live_schemas = Metadata::with_current(|m| m.updateable_schema());
 
         // Telemetry setup
+        // Note: we didn't remove the leader label to avoid breaking existing dashboards. This can
+        // be removed in the future if deemed necessary.
         let leader_record_write_to_read_latency = histogram!(PARTITION_RECORD_COMMITTED_TO_READ_LATENCY_SECONDS, LEADER_LABEL => LEADER_LABEL_LEADER);
-        let follower_record_write_to_read_latency = histogram!(PARTITION_RECORD_COMMITTED_TO_READ_LATENCY_SECONDS, LEADER_LABEL => LEADER_LABEL_FOLLOWER);
-        // Start reading after the last applied lsn
 
+        // Start reading after the last applied lsn
         let mut record_stream = std::pin::pin!(
             self.bifrost
                 .create_reader(
@@ -706,7 +706,6 @@ where
                             &mut vqueues,
                             &started_at,
                             &leader_record_write_to_read_latency,
-                            &follower_record_write_to_read_latency,
                         )
                         .await?;
 
@@ -1142,7 +1141,6 @@ where
         vqueues: &mut VQueuesMetaCache,
         started_at: &Instant,
         leader_record_write_to_read_latency: &metrics::Histogram,
-        follower_record_write_to_read_latency: &metrics::Histogram,
     ) -> Result<(), ProcessorError> {
         let Some((lsn, record)) = self.maybe_advance(entry, txn, started_at)? else {
             // this happens when we are reading a filtered gap
@@ -1151,8 +1149,6 @@ where
 
         if self.leadership_state.is_leader() {
             leader_record_write_to_read_latency.record(record.created_at().elapsed());
-        } else {
-            follower_record_write_to_read_latency.record(record.created_at().elapsed());
         }
 
         let record = LsnEnvelope {
