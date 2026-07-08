@@ -210,7 +210,7 @@ fn default_max_interval() -> NonZeroFriendlyDuration {
     NonZeroFriendlyDuration::from_secs_unchecked(60)
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(rename = "OnMaxAttempts"))]
 #[serde(rename_all = "kebab-case")]

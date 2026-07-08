@@ -270,6 +270,7 @@ pub(super) struct InvocationTask<EE, DMR> {
     message_size_warning: NonZeroUsize,
     message_size_limit: NonZeroUsize,
     retry_count_since_last_stored_entry: u32,
+    max_awaited_future_depth: usize,
 
     // Invoker tx/rx
     entry_enricher: EE,
@@ -361,6 +362,7 @@ where
         limit_key: LimitKey<ReString>,
         idempotency_key: Option<ReString>,
         allow_protocol_v7: bool,
+        max_awaited_future_depth: usize,
     ) -> Self {
         Self {
             client,
@@ -381,6 +383,7 @@ where
             allow_protocol_v7,
             limit_key,
             idempotency_key,
+            max_awaited_future_depth,
         }
     }
 
@@ -596,6 +599,7 @@ where
                 self,
                 chosen_service_protocol_version,
                 &deployment.ty,
+                self.max_awaited_future_depth,
             );
             service_protocol_runner
                 .run(

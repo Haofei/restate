@@ -457,6 +457,24 @@ pub struct InvokerOptions {
     /// Since v1.7.0
     #[serde(flatten)]
     pub service_client: ServiceClientOptions,
+
+    /// # Maximum awaited future nesting depth
+    ///
+    /// The maximum nesting depth allowed for the futures (promises) an invocation
+    /// awaits on. Restate futures can be composed with combinators (e.g. `all`,
+    /// `race`), and each level of composition adds one level of nesting. This limit
+    /// bounds how deeply such futures may be nested, guarding against unbounded or
+    /// runaway recursion in service code.
+    ///
+    /// When an invocation awaits on (or suspends on) a future whose nesting depth
+    /// exceeds this limit, the attempt fails with a "maximum promise recursion
+    /// reached" error, and the invocation is then handled according to
+    /// `on-future-recursion-limit`.
+    ///
+    /// Default: `1000`.
+    ///
+    /// Since v1.7.2
+    pub max_awaited_future_depth: usize,
 }
 
 impl InvokerOptions {
@@ -591,6 +609,7 @@ impl Default for InvokerOptions {
             per_invocation_memory_limit: None,
             per_invocation_initial_memory: DEFAULT_PER_INVOCATION_INITIAL_MEMORY,
             service_client: ServiceClientOptions::default(),
+            max_awaited_future_depth: 1000,
         }
     }
 }

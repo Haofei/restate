@@ -186,6 +186,7 @@ where
                     limit_key,
                     idempotency_key,
                     self.allow_protocol_v7,
+                    opts.max_awaited_future_depth,
                 )
                 .run(storage_reader, budget),
             )
