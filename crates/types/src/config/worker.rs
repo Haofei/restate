@@ -473,7 +473,7 @@ pub struct InvokerOptions {
     ///
     /// Default: `1000`.
     ///
-    /// Since v1.7.2
+    /// Since v1.7.3
     pub max_awaited_future_depth: usize,
 }
 

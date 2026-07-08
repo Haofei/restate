@@ -190,9 +190,9 @@ pub(crate) enum InvokerError {
     #[error("{0}")]
     #[code(restate_errors::RT0001)]
     OutOfMemory(InvocationMemoryExhausted),
-    #[error("maximum awaited future depth limit of {limit} has been reached. got '{depth}'")]
+    #[error("maximum awaited future depth limit of {limit} has been reached.")]
     #[code(restate_errors::RT0025)]
-    MaxFutureDepthReached { limit: usize, depth: usize },
+    MaxFutureDepthReached { limit: usize },
 }
 
 /// Describes a memory budget exhaustion that occurred during invocation

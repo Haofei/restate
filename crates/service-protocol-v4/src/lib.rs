@@ -77,21 +77,27 @@ pub mod proto {
         }
 
         impl super::Future {
-            // Gets the maximum depth of this future non-recursively
+            // Checks whether the nesting depth of this future stays within
+            // `max_depth`, returning `true` as soon as the bound is exceeded.
             //
-            // To avoid possible stack overflow for deeply nested futures
-            // this function does some heap allocations. It's advised to
-            // calculate the depth once and keep it around if you need to
-            // do multiple calculations against it
-            pub fn depth(&self) -> usize {
-                let mut depth = 0;
-                let mut stack = vec![DepthStackFrame {
+            // The traversal is iterative rather than recursive to avoid a
+            // possible stack overflow on deeply nested futures. It trades that
+            // for some heap allocation: an explicit stack pre-sized to
+            // `max_depth`.
+            pub fn is_too_deep(&self, max_depth: usize) -> bool {
+                let mut stack = Vec::with_capacity(max_depth.min(128));
+                stack.push(DepthStackFrame {
                     inner: self,
                     cursor: 0,
-                }];
+                });
 
+                let mut depth = 0;
                 while let Some(mut current) = stack.pop() {
                     depth = depth.max(stack.len());
+                    if depth > max_depth {
+                        return true;
+                    }
+
                     if current.cursor >= current.inner.nested_futures.len() {
                         continue;
                     }
@@ -105,10 +111,11 @@ pub mod proto {
                     });
                 }
 
-                depth
+                false
             }
         }
 
+        pub struct MaxDepthReached;
         struct DepthStackFrame<'a> {
             inner: &'a super::Future,
             cursor: usize,
@@ -188,7 +195,7 @@ pub mod proto {
                 ..Default::default()
             };
 
-            assert_eq!(fut.depth(), 0);
+            assert!(!fut.is_too_deep(0));
 
             // Fut([Fut, Fut]) --> max depth is 1
             let fut = super::Future {
@@ -203,7 +210,8 @@ pub mod proto {
                 ..Default::default()
             };
 
-            assert_eq!(fut.depth(), 1);
+            assert!(!fut.is_too_deep(1));
+            assert!(fut.is_too_deep(0));
 
             // Fut([Fut([Fut]), Fut]) --> max depth is 2
             let fut = super::Future {
@@ -221,7 +229,9 @@ pub mod proto {
                 ..Default::default()
             };
 
-            assert_eq!(fut.depth(), 2);
+            assert!(!fut.is_too_deep(2));
+            assert!(!fut.is_too_deep(3));
+            assert!(fut.is_too_deep(1));
 
             let mut fut = super::Future {
                 ..Default::default()
@@ -234,7 +244,8 @@ pub mod proto {
                 };
             }
 
-            assert_eq!(fut.depth(), 10);
+            assert!(!fut.is_too_deep(10));
+            assert!(fut.is_too_deep(9));
         }
     }
 }
