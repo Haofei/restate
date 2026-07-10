@@ -667,22 +667,27 @@ impl PartitionStore {
 
     /// Returns `true` if the one-time cleanup of orphaned `jc` index entries has not yet been
     /// performed on this partition store.
-    pub fn needs_jc_orphan_cleanup(&mut self) -> Result<bool> {
-        is_jc_orphan_cleanup_done(self, self.partition_id()).map(|done| !done)
+    pub async fn needs_jc_orphan_cleanup(&mut self) -> Result<bool> {
+        is_jc_orphan_cleanup_done(self, self.partition_id())
+            .await
+            .map(|done| !done)
     }
 
     /// Marks the one-time `jc` orphan cleanup as complete so it won't run again.
-    pub fn mark_jc_orphan_cleanup_done(&mut self) -> Result<()> {
-        put_jc_orphan_cleanup_done(self, self.partition_id())
+    pub async fn mark_jc_orphan_cleanup_done(&mut self) -> Result<()> {
+        put_jc_orphan_cleanup_done(self, self.partition_id()).await
     }
 
-    pub async fn verify_and_run_migrations(&mut self) -> Result<()> {
+    pub async fn verify_and_run_migrations(
+        &mut self,
+        config: &Configuration,
+    ) -> Result<(), StorageError> {
         // The target schema version is gated by the operator opt-in. Without
         // the flag we leave the partition at `V1_5` so a downgrade to a
         // pre-`ScopedStateAndPromise` binary stays possible. With the flag
         // enabled we migrate the unscoped state and promise tables into their
         // scoped variants and bump to `ScopedStateAndPromise`.
-        let target = if Configuration::pinned()
+        let target = if config
             .common
             .experimental
             .is_migrate_scoped_tables_enabled()
@@ -697,10 +702,10 @@ impl PartitionStore {
         // also updates the applied lsn field.
         let is_empty = self.get_applied_lsn().await?.is_none();
         if is_empty {
-            put_storage_version(self, self.partition_id(), target as u16).await?;
+            put_storage_version(self, self.partition().id(), target as u16).await?;
             // A fresh partition store cannot have orphaned jc index entries, so mark the
             // cleanup as already done to avoid a needless scan on first startup.
-            put_jc_orphan_cleanup_done(self, self.partition_id())?;
+            put_jc_orphan_cleanup_done(self, self.partition().id()).await?;
             self.set_storage_version(target);
             return Ok(());
         }
@@ -719,7 +724,6 @@ impl PartitionStore {
             storage_version = run_migrations_up_to(storage_version, target, self).await?;
         }
         self.set_storage_version(storage_version);
-
         Ok(())
     }
 }

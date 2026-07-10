@@ -295,7 +295,7 @@ mod tests {
             .expect("seeding unknown storage version should succeed");
 
         let err = store
-            .verify_and_run_migrations()
+            .verify_and_run_migrations(&Configuration::pinned())
             .await
             .expect_err("unknown storage version should fail verify_and_run_migrations");
         let msg = err.to_string();

@@ -489,7 +489,9 @@ where
         // where not every node runs every partition, it can happen that partition data remains
         // untouched when going from one version to the next.
         // todo https://github.com/restatedev/restate/issues/4175.
-        partition_store.verify_and_run_migrations().await?;
+        partition_store
+            .verify_and_run_migrations(self.config.live_load())
+            .await?;
 
         let last_applied_lsn = partition_store
             .get_applied_lsn()

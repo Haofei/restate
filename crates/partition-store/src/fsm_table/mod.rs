@@ -200,7 +200,7 @@ pub(crate) fn append_storage_version_to_wb(
     Ok(())
 }
 
-pub(crate) fn is_jc_orphan_cleanup_done<S: StorageAccess>(
+pub(crate) async fn is_jc_orphan_cleanup_done<S: StorageAccess>(
     storage: &mut S,
     partition_id: PartitionId,
 ) -> Result<bool> {
@@ -208,7 +208,7 @@ pub(crate) fn is_jc_orphan_cleanup_done<S: StorageAccess>(
         .map(|opt| opt.is_some())
 }
 
-pub(crate) fn put_jc_orphan_cleanup_done<S: StorageAccess>(
+pub(crate) async fn put_jc_orphan_cleanup_done<S: StorageAccess>(
     storage: &mut S,
     partition_id: PartitionId,
 ) -> Result<()> {

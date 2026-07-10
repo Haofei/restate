@@ -162,7 +162,7 @@ where
                     // Runs on a blocking thread so it doesn't starve the tokio runtime.
                     // The child task is bound to the partition processor's lifecycle and
                     // will be cancelled if the processor shuts down (e.g. due to trim gap).
-                    let cleanup_task = if partition_store.needs_jc_orphan_cleanup()? {
+                    let cleanup_task = if partition_store.needs_jc_orphan_cleanup().await? {
                         let mut cleanup_store = partition_store.clone();
                         let cleanup_partition_id = partition_store.partition_id();
                         let cleanup_task = TaskCenter::spawn_unmanaged_child(
@@ -208,7 +208,7 @@ where
                                                 "No orphaned journal completion-id index entries found"
                                             );
                                         }
-                                        if !outcome.cancelled && let Err(err) = cleanup_store.mark_jc_orphan_cleanup_done()
+                                        if !outcome.cancelled && let Err(err) = cleanup_store.mark_jc_orphan_cleanup_done().await
                                             {
                                                 warn!(
                                                     partition_id = %cleanup_partition_id,
