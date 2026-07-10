@@ -181,6 +181,7 @@ pub enum ReplayStatus {
 
 #[derive(Debug, Clone, IntoProst, bilrost::Message, NetSerde)]
 #[prost(target = "crate::protobuf::cluster::PartitionProcessorStatus")]
+#[bilrost(reserved_tags(8))]
 pub struct PartitionProcessorStatus {
     #[prost(required)]
     #[bilrost(1)]
@@ -197,8 +198,6 @@ pub struct PartitionProcessorStatus {
     pub last_applied_log_lsn: Option<Lsn>,
     #[bilrost(7)]
     pub last_record_applied_at: Option<MillisSinceEpoch>,
-    #[bilrost(8)]
-    pub num_skipped_records: u64,
     #[bilrost(9)]
     pub replay_status: ReplayStatus,
     #[bilrost(10)]
@@ -248,7 +247,6 @@ impl Default for PartitionProcessorStatus {
             last_observed_leader_node: None,
             last_applied_log_lsn: None,
             last_record_applied_at: None,
-            num_skipped_records: 0,
             replay_status: ReplayStatus::Starting,
             durable_lsn: None,
             last_archived_log_lsn: None,
