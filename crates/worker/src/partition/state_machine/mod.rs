@@ -342,9 +342,8 @@ trait CommandHandler<CTX> {
 
 impl StateMachine {
     // todo(soli):
-    // - This should accept `LsnEnvelope` instead of `Command` to get access to created_at, header,
+    // - This should accept `DataRecord<Envelope<Raw>>` instead of `Envelope<Raw>` to get access to created_at, header,
     // and lsn.
-    // - Accept `LsnEnvelope` by reference.
     #[allow(clippy::too_many_arguments)]
     pub async fn apply<TransactionType: restate_storage_api::Transaction + Send>(
         &mut self,

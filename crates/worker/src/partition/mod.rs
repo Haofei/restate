@@ -19,6 +19,8 @@
 mod cleaner;
 pub mod invoker_storage_reader;
 mod leadership;
+pub mod node;
+mod processor;
 mod rpc;
 pub mod shuffle;
 #[cfg(feature = "expose-internals")]
@@ -199,7 +201,7 @@ impl PartitionProcessorBuilder {
         }
 
         let last_seen_leader_epoch = partition_store
-            .get_dedup_sequence_number(&ProducerId::self_producer())
+            .get_dedup_sequence_number(ProducerId::self_producer())
             .await?
             .map(|dedup| {
                 let_assert!(
@@ -370,6 +372,15 @@ pub enum ProcessorError {
     PartitionAheadOfLog {
         partition_applied_lsn: Lsn,
         log_tail_lsn: Lsn,
+    },
+    #[error(
+        "partition is blocked; requires an upgrade to restate-server version \
+        {required_min_version} or higher; reason='{barrier_reason}'; feature changes={feature_changes:?}"
+    )]
+    VersionBarrier {
+        required_min_version: SemanticRestateVersion,
+        barrier_reason: String,
+        feature_changes: Vec<u16>,
     },
     #[error(transparent)]
     Storage(#[from] StorageError),

@@ -8,6 +8,8 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use restate_types::partitions::PersistedFeatures;
+
 /// Read-only view of the state-machine features currently enabled for a partition.
 ///
 /// Each feature is gated either on the partition's persisted minimum Restate-server version
@@ -33,16 +35,49 @@ pub trait PartitionFeatures {
     fn is_unique_random_seeds_enabled(&self) -> bool;
 }
 
+impl PartitionFeatures for PersistedFeatures {
+    #[inline]
+    fn use_journal_v2_as_default(&self) -> bool {
+        self.journal_v2
+    }
+
+    #[inline]
+    fn is_vqueues_enabled(&self) -> bool {
+        self.vqueues
+    }
+
+    #[inline]
+    fn is_unique_random_seeds_enabled(&self) -> bool {
+        self.unique_random_seeds
+    }
+}
+
+// -- Boilerplate --
+
 impl<T: PartitionFeatures> PartitionFeatures for &T {
     fn use_journal_v2_as_default(&self) -> bool {
-        (*self).use_journal_v2_as_default()
+        (**self).use_journal_v2_as_default()
     }
 
     fn is_vqueues_enabled(&self) -> bool {
-        (*self).is_vqueues_enabled()
+        (**self).is_vqueues_enabled()
     }
 
     fn is_unique_random_seeds_enabled(&self) -> bool {
-        (*self).is_unique_random_seeds_enabled()
+        (**self).is_unique_random_seeds_enabled()
+    }
+}
+
+impl<T: PartitionFeatures> PartitionFeatures for &mut T {
+    fn use_journal_v2_as_default(&self) -> bool {
+        (**self).use_journal_v2_as_default()
+    }
+
+    fn is_vqueues_enabled(&self) -> bool {
+        (**self).is_vqueues_enabled()
+    }
+
+    fn is_unique_random_seeds_enabled(&self) -> bool {
+        (**self).is_unique_random_seeds_enabled()
     }
 }
