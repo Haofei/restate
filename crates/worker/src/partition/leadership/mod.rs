@@ -74,6 +74,7 @@ use restate_wal_protocol::timer::TimerKeyValue;
 use restate_wal_protocol::{Command, Envelope};
 use restate_worker_api::invoker::InvokerHandle;
 use restate_worker_api::invoker::capacity::InvokerCapacity;
+use restate_worker_api::processor::PartitionFeatures;
 use restate_worker_api::{
     LeaderQueryCommand, LeaderQueryRequest, LeaderQueryResponse, LeaderQuerySender,
 };
@@ -88,7 +89,7 @@ use crate::partition::leadership::leader_state::LeaderState;
 use crate::partition::leadership::self_proposer::SelfProposer;
 use crate::partition::shuffle;
 use crate::partition::shuffle::{OutboxReaderError, Shuffle, ShuffleMetadata};
-use crate::partition::state_machine::{Action, StateMachine, StateMachineFeatures};
+use crate::partition::state_machine::{Action, StateMachine};
 use crate::partition::types::InvokerEffect;
 use crate::partition_processor_manager::PartitionLeaderHandlesRegistry;
 use crate::rule_book_cache::RuleBookCacheHandle;
@@ -344,7 +345,7 @@ where
         config: &Configuration,
         vqueues_cache: &mut VQueuesMetaCache,
         rule_book: &RuleBook,
-        state_machine_features: impl StateMachineFeatures,
+        state_machine_features: impl PartitionFeatures,
         min_restate_version: &SemanticRestateVersion,
     ) -> Result<bool, Error> {
         self.last_seen_leader_epoch = Some(announce_leader.leader_epoch);
@@ -414,7 +415,7 @@ where
         vqueues_cache: &mut VQueuesMetaCache,
         config: &Configuration,
         rule_book: &RuleBook,
-        state_machine_features: impl StateMachineFeatures,
+        state_machine_features: impl PartitionFeatures,
         min_restate_version: &SemanticRestateVersion,
     ) -> Result<(), Error> {
         if let State::Candidate {
@@ -946,7 +947,6 @@ mod tests {
     use crate::partition::LeadershipInfo;
     use crate::partition::leadership::trim_queue::TrimQueue;
     use crate::partition::leadership::{LeadershipState, State};
-    use crate::partition::state_machine::StateMachineFeatures;
     use crate::partition_processor_manager::PartitionLeaderHandlesRegistry;
     use crate::rule_book_cache::RuleBookCacheHandle;
     use assert2::let_assert;
@@ -968,6 +968,7 @@ mod tests {
     use restate_wal_protocol::Command;
     use restate_wal_protocol::Envelope;
     use restate_worker_api::invoker::capacity::InvokerCapacity;
+    use restate_worker_api::processor::PartitionFeatures;
     use std::num::NonZeroUsize;
     use std::sync::Arc;
     use test_log::test;
@@ -980,7 +981,7 @@ mod tests {
 
     struct MockStateMachineFeatures;
 
-    impl StateMachineFeatures for MockStateMachineFeatures {
+    impl PartitionFeatures for MockStateMachineFeatures {
         fn use_journal_v2_as_default(&self) -> bool {
             true
         }

@@ -161,9 +161,7 @@ mod tests {
     use restate_types::identifiers::{InvocationId, PartitionKey, ServiceId};
     use restate_types::invocation::InvocationTarget;
     use restate_types::logs::Keys;
-    use restate_types::partitions::features::{
-        PartitionFeatureChange, PersistedStateMachineFeatures,
-    };
+    use restate_types::partitions::features::{PartitionFeatureChange, PersistedFeatures};
     use restate_types::sharding::KeyRange;
     use restate_types::state_mut::ExternalStateMutation;
     use restate_wal_protocol::control::VersionBarrierCommand;
@@ -466,7 +464,7 @@ mod tests {
             None,
             KeyRange::FULL,
             SemanticRestateVersion::unknown(),
-            PersistedStateMachineFeatures {
+            PersistedFeatures {
                 journal_v2: false,
                 vqueues: true,
                 unique_random_seeds: false,

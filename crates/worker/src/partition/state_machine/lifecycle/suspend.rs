@@ -171,7 +171,7 @@ mod tests {
         SignalResult, SleepCommand, SleepCompletion, UnresolvedFuture, all_completed,
         all_succeeded_or_first_failed, first_completed, first_succeeded_or_all_failed, unknown,
     };
-    use restate_types::partitions::{PartitionFeatureChange, PersistedStateMachineFeatures};
+    use restate_types::partitions::{PartitionFeatureChange, PersistedFeatures};
     use restate_types::time::MillisSinceEpoch;
     use restate_wal_protocol::timer::TimerKeyValue;
     use restate_wal_protocol::v2::{Command, commands};
@@ -292,18 +292,18 @@ mod tests {
 
     #[restate_core::test]
     async fn suspend_waiting_on_signal() {
-        run_suspend_waiting_on_signal(PersistedStateMachineFeatures::default()).await;
+        run_suspend_waiting_on_signal(PersistedFeatures::default()).await;
     }
 
     #[restate_core::test]
     async fn suspend_waiting_on_signal_journal_v2_enabled() {
-        run_suspend_waiting_on_signal(PersistedStateMachineFeatures::from_iter([
+        run_suspend_waiting_on_signal(PersistedFeatures::from_iter([
             PartitionFeatureChange::EnableJournalV2,
         ]))
         .await;
     }
 
-    async fn run_suspend_waiting_on_signal(features: PersistedStateMachineFeatures) {
+    async fn run_suspend_waiting_on_signal(features: PersistedFeatures) {
         let mut test_env = TestEnv::create_with_features(features).await;
         let invocation_id = fixtures::mock_start_invocation(&mut test_env).await;
         // We don't pin the deployment here, but this should work nevertheless.

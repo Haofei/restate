@@ -339,7 +339,7 @@ mod tests {
         CommandType, CompletionType, NotificationType, OutputCommand, OutputResult, Signal,
         SignalId, SignalResult, SleepCommand,
     };
-    use restate_types::partitions::{PartitionFeatureChange, PersistedStateMachineFeatures};
+    use restate_types::partitions::{PartitionFeatureChange, PersistedFeatures};
     use restate_types::service_protocol::ServiceProtocolVersion;
     use restate_types::time::MillisSinceEpoch;
     use restate_wal_protocol::timer::TimerKeyValue;
@@ -423,11 +423,10 @@ mod tests {
     async fn restart_killed_invocation() {
         // This works only when using journal table v2 as default!
         // The corner case with journal table v1 is handled by the rpc handler instead.
-        let mut test_env =
-            TestEnv::create_with_features(PersistedStateMachineFeatures::from_iter([
-                PartitionFeatureChange::EnableJournalV2,
-            ]))
-            .await;
+        let mut test_env = TestEnv::create_with_features(PersistedFeatures::from_iter([
+            PartitionFeatureChange::EnableJournalV2,
+        ]))
+        .await;
 
         // Start invocation, then kill it
         let invocation_target = InvocationTarget::mock_virtual_object();

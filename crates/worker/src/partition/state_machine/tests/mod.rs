@@ -85,10 +85,10 @@ impl TestEnv {
     }
 
     pub async fn create() -> Self {
-        Self::create_with_features(PersistedStateMachineFeatures::default()).await
+        Self::create_with_features(PersistedFeatures::default()).await
     }
 
-    pub async fn create_with_features(features: PersistedStateMachineFeatures) -> Self {
+    pub async fn create_with_features(features: PersistedFeatures) -> Self {
         Self::create_with_state_machine(StateMachine::new(
             0,    /* inbox_seq_number */
             0,    /* outbox_seq_number */
@@ -310,7 +310,7 @@ impl TestEnv {
         );
     }
 
-    pub fn set_enabled_features(&mut self, features: PersistedStateMachineFeatures) {
+    pub fn set_enabled_features(&mut self, features: PersistedFeatures) {
         self.state_machine.enabled_features = features;
     }
 }
@@ -1084,8 +1084,8 @@ async fn truncate_outbox_with_gap() -> Result<(), Error> {
         Some(outbox_head_index),
         KeyRange::FULL,
         SemanticRestateVersion::unknown().clone(),
-        PersistedStateMachineFeatures::default(), /* enabled_features */
-        None,                                     /* schema */
+        PersistedFeatures::default(), /* enabled_features */
+        None,                         /* schema */
         Arc::new(RuleBook::default()),
         RuleBookCacheHandle::detached(),
     ))

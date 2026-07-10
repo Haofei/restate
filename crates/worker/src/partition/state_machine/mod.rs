@@ -16,6 +16,7 @@ mod utils;
 pub use actions::{Action, ActionCollector};
 // Re-exported so the resume RPC handler can resolve deployments the same way the apply path does.
 pub(crate) use lifecycle::resolve_pinned_deployment;
+use restate_worker_api::processor::PartitionFeatures;
 
 use std::collections::HashSet;
 use std::fmt;
@@ -108,7 +109,7 @@ use restate_types::journal_v2::{
 };
 use restate_types::logs::Lsn;
 use restate_types::message::MessageIndex;
-use restate_types::partitions::features::{PartitionFeatureChange, PersistedStateMachineFeatures};
+use restate_types::partitions::features::{PartitionFeatureChange, PersistedFeatures};
 use restate_types::schema::Schema;
 use restate_types::service_protocol::ServiceProtocolVersion;
 use restate_types::sharding::KeyRange;
@@ -135,46 +136,7 @@ use crate::metric_definitions::{
 use crate::partition::state_machine::lifecycle::OnCancelCommand;
 use crate::partition::types::{InvokerEffectKind, OutboxMessageExt};
 
-/// Read-only view of the state-machine features currently enabled for a partition.
-///
-/// Each feature is gated either on the partition's persisted minimum Restate-server version
-/// (`min_restate_version`) or on its persisted opt-in feature set
-/// ([`PersistedStateMachineFeatures`]), depending on what the feature requires. See each method's
-/// doc-comment for the specific gate.
-pub(crate) trait StateMachineFeatures {
-    /// Write to journal v2 instead of journal v1 by default. This is a preparational step for
-    /// removing the journal v1 after enabling this feature and migrating all unpinned invocations
-    /// from journal v1 to journal v2.
-    fn use_journal_v2_as_default(&self) -> bool;
-
-    /// Whether vqueue-related code paths are active on this partition.
-    ///
-    /// *Since v1.7.0*
-    fn is_vqueues_enabled(&self) -> bool;
-
-    /// Whether new invocations should persist a unique random seed
-    /// (invocation_id + record_created_at entropy). When off, SDKs derive the
-    /// seed from `InvocationId::to_random_seed()` at invoke time.
-    ///
-    /// *Since v1.7.0*
-    fn is_unique_random_seeds_enabled(&self) -> bool;
-}
-
-impl<T: StateMachineFeatures> StateMachineFeatures for &T {
-    fn use_journal_v2_as_default(&self) -> bool {
-        (*self).use_journal_v2_as_default()
-    }
-
-    fn is_vqueues_enabled(&self) -> bool {
-        (*self).is_vqueues_enabled()
-    }
-
-    fn is_unique_random_seeds_enabled(&self) -> bool {
-        (*self).is_unique_random_seeds_enabled()
-    }
-}
-
-impl StateMachineFeatures for StateMachine {
+impl PartitionFeatures for StateMachine {
     fn use_journal_v2_as_default(&self) -> bool {
         self.enabled_features.journal_v2
     }
@@ -188,7 +150,7 @@ impl StateMachineFeatures for StateMachine {
     }
 }
 
-impl<S> StateMachineFeatures for StateMachineApplyContext<'_, S> {
+impl<S> PartitionFeatures for StateMachineApplyContext<'_, S> {
     fn use_journal_v2_as_default(&self) -> bool {
         self.enabled_features.journal_v2
     }
@@ -201,7 +163,6 @@ impl<S> StateMachineFeatures for StateMachineApplyContext<'_, S> {
         self.enabled_features.unique_random_seeds
     }
 }
-
 pub struct StateMachine {
     // initialized from persistent storage
     pub(crate) inbox_seq_number: MessageIndex,
@@ -212,7 +173,7 @@ pub struct StateMachine {
     /// Set of state-machine features currently enabled on this partition.
     /// Mutated via `VersionBarrierCommand` entries carrying feature changes.
     /// *Since v1.7.0*
-    pub(crate) enabled_features: PersistedStateMachineFeatures,
+    pub(crate) enabled_features: PersistedFeatures,
     /// Sequence number of the next outbox message to be appended.
     pub(crate) outbox_seq_number: MessageIndex,
     /// Consistent schema
@@ -338,7 +299,7 @@ impl StateMachine {
         outbox_head_seq_number: Option<MessageIndex>,
         partition_key_range: KeyRange,
         min_restate_version: SemanticRestateVersion,
-        enabled_features: PersistedStateMachineFeatures,
+        enabled_features: PersistedFeatures,
         schema: Option<Schema>,
         rule_book: Arc<RuleBook>,
         rule_book_cache: RuleBookCacheHandle,
@@ -367,7 +328,7 @@ pub(crate) struct StateMachineApplyContext<'a, S> {
     outbox_seq_number: &'a mut MessageIndex,
     outbox_head_seq_number: &'a mut Option<MessageIndex>,
     min_restate_version: &'a mut SemanticRestateVersion,
-    enabled_features: &'a mut PersistedStateMachineFeatures,
+    enabled_features: &'a mut PersistedFeatures,
     schema: &'a mut Option<Schema>,
     rule_book: &'a mut Arc<RuleBook>,
     rule_book_cache: &'a RuleBookCacheHandle,

@@ -141,7 +141,7 @@ mod tests {
     use restate_types::journal_v2::{
         CANCEL_NOTIFICATION_ID, CANCEL_SIGNAL, CommandType, Entry, EntryMetadata, EntryType,
     };
-    use restate_types::partitions::{PartitionFeatureChange, PersistedStateMachineFeatures};
+    use restate_types::partitions::{PartitionFeatureChange, PersistedFeatures};
     use restate_types::service_protocol::ServiceProtocolVersion;
     use restate_types::time::MillisSinceEpoch;
     use restate_wal_protocol::v2::{Command, commands};
@@ -250,11 +250,10 @@ mod tests {
 
     #[restate_core::test]
     async fn cancel_invoked_invocation_without_pinned_deployment_with_journal_table_v2_default() {
-        let mut test_env =
-            TestEnv::create_with_features(PersistedStateMachineFeatures::from_iter([
-                PartitionFeatureChange::EnableJournalV2,
-            ]))
-            .await;
+        let mut test_env = TestEnv::create_with_features(PersistedFeatures::from_iter([
+            PartitionFeatureChange::EnableJournalV2,
+        ]))
+        .await;
         let invocation_id = fixtures::mock_start_invocation(&mut test_env).await;
 
         // Send signal notification before pinning the deployment
@@ -289,7 +288,7 @@ mod tests {
     #[restate_core::test]
     async fn cancel_scheduled_invocation_through_notify_signal() -> anyhow::Result<()> {
         Box::pin(run_cancel_scheduled_invocation_through_notify_signal(
-            PersistedStateMachineFeatures::default(),
+            PersistedFeatures::default(),
         ))
         .await
     }
@@ -298,13 +297,13 @@ mod tests {
     async fn cancel_scheduled_invocation_through_notify_signal_journal_v2_enabled()
     -> anyhow::Result<()> {
         Box::pin(run_cancel_scheduled_invocation_through_notify_signal(
-            PersistedStateMachineFeatures::from_iter([PartitionFeatureChange::EnableJournalV2]),
+            PersistedFeatures::from_iter([PartitionFeatureChange::EnableJournalV2]),
         ))
         .await
     }
 
     async fn run_cancel_scheduled_invocation_through_notify_signal(
-        features: PersistedStateMachineFeatures,
+        features: PersistedFeatures,
     ) -> anyhow::Result<()> {
         let mut test_env = TestEnv::create_with_features(features).await;
 
@@ -380,7 +379,7 @@ mod tests {
     #[restate_core::test]
     async fn cancel_inboxed_invocation_through_notify_signal() -> anyhow::Result<()> {
         Box::pin(run_cancel_inboxed_invocation_through_notify_signal(
-            PersistedStateMachineFeatures::default(),
+            PersistedFeatures::default(),
         ))
         .await
     }
@@ -389,13 +388,13 @@ mod tests {
     async fn cancel_inboxed_invocation_through_notify_signal_journal_v2_enabled()
     -> anyhow::Result<()> {
         Box::pin(run_cancel_inboxed_invocation_through_notify_signal(
-            PersistedStateMachineFeatures::from_iter([PartitionFeatureChange::EnableJournalV2]),
+            PersistedFeatures::from_iter([PartitionFeatureChange::EnableJournalV2]),
         ))
         .await
     }
 
     async fn run_cancel_inboxed_invocation_through_notify_signal(
-        features: PersistedStateMachineFeatures,
+        features: PersistedFeatures,
     ) -> anyhow::Result<()> {
         let mut test_env = TestEnv::create_with_features(features).await;
 

@@ -431,23 +431,23 @@ mod tests {
         Header, InvocationResponse, InvocationTarget, JournalCompletionTarget, ResponseResult,
     };
     use restate_types::journal_v2::{CallCommand, CallRequest};
-    use restate_types::partitions::{PartitionFeatureChange, PersistedStateMachineFeatures};
+    use restate_types::partitions::{PartitionFeatureChange, PersistedFeatures};
     use restate_wal_protocol::v2::{Command, commands};
 
     #[restate_core::test]
     async fn update_journal_and_commands_length() {
-        run_update_journal_and_commands_length(PersistedStateMachineFeatures::default()).await;
+        run_update_journal_and_commands_length(PersistedFeatures::default()).await;
     }
 
     #[restate_core::test]
     async fn update_journal_and_commands_length_journal_v2_enabled() {
-        run_update_journal_and_commands_length(PersistedStateMachineFeatures::from_iter([
+        run_update_journal_and_commands_length(PersistedFeatures::from_iter([
             PartitionFeatureChange::EnableJournalV2,
         ]))
         .await;
     }
 
-    async fn run_update_journal_and_commands_length(features: PersistedStateMachineFeatures) {
+    async fn run_update_journal_and_commands_length(features: PersistedFeatures) {
         let mut test_env = TestEnv::create_with_features(features).await;
         let invocation_id = fixtures::mock_start_invocation(&mut test_env).await;
         fixtures::mock_pinned_deployment_v5(&mut test_env, invocation_id).await;
