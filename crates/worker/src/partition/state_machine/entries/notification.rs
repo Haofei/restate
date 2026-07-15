@@ -17,6 +17,7 @@ use restate_types::identifiers::{EntryIndex, InvocationId};
 use restate_types::journal_v2::CANCEL_NOTIFICATION_ID;
 use restate_types::journal_v2::raw::RawNotification;
 
+use crate::partition::processor::ProcessorContext;
 use crate::partition::state_machine::lifecycle::ResumeInvocationCommand;
 use crate::partition::state_machine::{CommandHandler, Error, StateMachineApplyContext};
 
@@ -27,12 +28,13 @@ pub(super) struct ApplyNotificationCommand<'e> {
     pub(super) entry_index: EntryIndex,
 }
 
-impl<'e, 'ctx: 'e, 's: 'ctx, S> CommandHandler<&'ctx mut StateMachineApplyContext<'s, S>>
+impl<'e, 'ctx: 'e, 's: 'ctx, S, P> CommandHandler<&'ctx mut StateMachineApplyContext<'s, S, P>>
     for ApplyNotificationCommand<'e>
 where
     S: WriteVQueueTable + ReadVQueueTable + WriteLockTable,
+    P: ProcessorContext,
 {
-    async fn apply(self, ctx: &'ctx mut StateMachineApplyContext<'s, S>) -> Result<(), Error> {
+    async fn apply(self, ctx: &'ctx mut StateMachineApplyContext<'s, S, P>) -> Result<(), Error> {
         // If we're suspended, let's figure out if we need to resume
         match self.invocation_status {
             InvocationStatus::Suspended { awaiting_on, .. } => {

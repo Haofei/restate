@@ -51,6 +51,7 @@ use restate_types::storage::{StoredRawEntry, StoredRawEntryHeader};
 
 use crate::debug_if_leader;
 use crate::metric_definitions::USAGE_LEADER_JOURNAL_ENTRY_COUNT;
+use crate::partition::processor::ProcessorContext;
 use crate::partition::state_machine::entries::attach_invocation_command::ApplyAttachInvocationCommand;
 use crate::partition::state_machine::entries::call_commands::{
     ApplyCallCommand, ApplyOneWayCallCommand,
@@ -103,7 +104,7 @@ impl OnJournalEntryCommand {
     }
 }
 
-impl<'ctx, 's: 'ctx, S> CommandHandler<&'ctx mut StateMachineApplyContext<'s, S>>
+impl<'ctx, 's: 'ctx, S, P> CommandHandler<&'ctx mut StateMachineApplyContext<'s, S, P>>
     for OnJournalEntryCommand
 where
     S: WriteJournalTable
@@ -122,8 +123,12 @@ where
         + WriteVQueueTable
         + WriteLockTable
         + ReadVQueueTable,
+    P: ProcessorContext,
 {
-    async fn apply(mut self, ctx: &'ctx mut StateMachineApplyContext<'s, S>) -> Result<(), Error> {
+    async fn apply(
+        mut self,
+        ctx: &'ctx mut StateMachineApplyContext<'s, S, P>,
+    ) -> Result<(), Error> {
         if !matches!(self.invocation_status, InvocationStatus::Invoked(_))
             && !matches!(self.invocation_status, InvocationStatus::Suspended { .. })
             && !matches!(self.invocation_status, InvocationStatus::Paused(_))

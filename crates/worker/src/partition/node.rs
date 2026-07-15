@@ -8,9 +8,6 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-// todo: remove when using this module
-#![allow(dead_code)]
-
 use restate_bifrost::Bifrost;
 use restate_types::GenerationalNodeId;
 use restate_types::config::Configuration;
@@ -58,6 +55,7 @@ impl NodeContext {
         }
     }
 
+    #[inline]
     pub fn my_node_id(&self) -> GenerationalNodeId {
         self.my_node_id
     }

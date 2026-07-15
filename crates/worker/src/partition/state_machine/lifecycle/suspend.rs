@@ -25,6 +25,7 @@ use restate_types::journal_v2::UnresolvedFuture;
 use restate_types::vqueues::EntryId;
 use restate_vqueues::VQueue;
 
+use crate::partition::processor::ProcessorContext;
 use crate::partition::state_machine::lifecycle::event::ApplyEventCommand;
 use crate::partition::state_machine::{CommandHandler, Error, StateMachineApplyContext};
 
@@ -36,7 +37,7 @@ pub struct OnSuspendCommand {
     pub emit_event: bool,
 }
 
-impl<'ctx, 's: 'ctx, S> CommandHandler<&'ctx mut StateMachineApplyContext<'s, S>>
+impl<'ctx, 's: 'ctx, S, P> CommandHandler<&'ctx mut StateMachineApplyContext<'s, S, P>>
     for OnSuspendCommand
 where
     S: ReadJournalTable
@@ -45,8 +46,12 @@ where
         + WriteVQueueTable
         + ReadVQueueTable
         + WriteLockTable,
+    P: ProcessorContext,
 {
-    async fn apply(mut self, ctx: &'ctx mut StateMachineApplyContext<'s, S>) -> Result<(), Error> {
+    async fn apply(
+        mut self,
+        ctx: &'ctx mut StateMachineApplyContext<'s, S, P>,
+    ) -> Result<(), Error> {
         debug_assert!(
             !self.awaiting_on.is_empty(),
             "Expecting at least one entry on which the invocation {} is waiting.",
@@ -126,7 +131,7 @@ where
                 VQueue::get(
                     header.vqueue_id(),
                     ctx.storage,
-                    ctx.vqueues_cache,
+                    ctx.processor.vqueues_mut(),
                     ctx.is_leader.then_some(ctx.action_collector),
                 )
                 .await?

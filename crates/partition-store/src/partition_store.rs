@@ -44,9 +44,10 @@ use restate_types::storage::StorageEncode;
 
 use restate_types::partitions::StorageVersion;
 
+use crate::fsm_table::put_storage_version;
 use crate::fsm_table::{
     get_locally_durable_lsn, get_storage_version_from_partition_db, is_jc_orphan_cleanup_done,
-    put_jc_orphan_cleanup_done, put_storage_version,
+    put_jc_orphan_cleanup_done,
 };
 use crate::keys::{EncodeTableKey, EncodeTableKeyPrefix, KeyKind};
 use crate::migrations::run_migrations_up_to;

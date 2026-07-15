@@ -26,6 +26,7 @@ use restate_types::journal::enriched::EnrichedEntryHeader;
 use restate_types::journal_v2::NotificationId;
 use restate_types::journal_v2::UnresolvedFuture;
 use restate_types::partitions::PartitionFeatureChange;
+use restate_types::partitions::PersistedFeatures;
 use restate_types::service_protocol;
 use rstest::rstest;
 use test_log::test;

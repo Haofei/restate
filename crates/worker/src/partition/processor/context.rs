@@ -8,9 +8,6 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-// todo: remove when using this module
-#![allow(dead_code)]
-
 use std::sync::Arc;
 
 use metrics::gauge;
@@ -176,7 +173,6 @@ impl ProcessorRawContext {
     }
 
     pub fn merge_with_status(&mut self, other: &mut PartitionProcessorStatus) {
-        other.last_applied_rule_book_version = Some(self.fsm_cache.rule_book_version());
         other.last_applied_log_lsn = Some(self.fsm_cache.last_applied_lsn());
         other.last_applied_schema_version = Some(self.fsm_cache.schema_version());
         let rule_book_version = self.fsm_cache.rule_book_version();
@@ -197,8 +193,8 @@ impl ProcessorRawContext {
 
     pub fn update_last_applied_lsn<S: WriteFsmTable>(
         &mut self,
-        lsn: Lsn,
         txn: &mut S,
+        lsn: Lsn,
     ) -> Result<(), ProcessorError> {
         self.fsm_cache.set_last_applied_lsn(txn, lsn);
         if self.status.update_last_applied_lsn(lsn) {

@@ -8,8 +8,20 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-// todo: remove when using this module
-#![allow(dead_code)]
+mod announce_leader;
+mod truncate_outbox;
+mod update_durability;
+mod upsert_rule_book;
+mod upsert_schema;
+mod version_barrier;
+
+// Re-exports
+pub use announce_leader::AnnounceLeaderContext;
+pub use truncate_outbox::TruncateOutboxContext;
+pub use update_durability::UpdateDurabilityContext;
+pub use upsert_rule_book::UpsertRuleBookContext;
+pub use upsert_schema::UpsertSchemaContext;
+pub use version_barrier::VersionBarrierContext;
 
 use restate_bifrost::DataRecord;
 use restate_types::logs::Lsn;

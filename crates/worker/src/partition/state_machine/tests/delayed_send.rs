@@ -12,7 +12,7 @@ use super::*;
 
 use restate_storage_api::inbox_table::ReadInboxTable;
 use restate_types::invocation::SubmitNotificationSink;
-use restate_types::partitions::PartitionFeatureChange;
+use restate_types::partitions::{PartitionFeatureChange, PersistedFeatures};
 use restate_types::time::MillisSinceEpoch;
 use std::time::{Duration, SystemTime};
 use test_log::test;

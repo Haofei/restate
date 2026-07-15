@@ -8,9 +8,6 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-// todo: remove when using this module
-#![allow(dead_code, unused_imports)]
-
 //! The partition-processor context and its capability traits.
 //!
 //! The shared capability-trait pattern (`Has<Cap>` / `<Cap>Access` / `<Cap>Mut`) and the
@@ -37,7 +34,7 @@ pub use context::ProcessorRawContext;
 pub use dedup::{DedupAccess, DedupMut, HasDedup, HasDedupMut};
 pub use restate_vqueues::context::{HasVQueues, HasVQueuesMut};
 pub use restate_worker_api::processor::*;
-pub use status::{HasStatusMut, Status};
+pub use status::HasStatusMut;
 
 use self::fsm::Fsm;
 

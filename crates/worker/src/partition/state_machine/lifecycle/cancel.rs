@@ -8,8 +8,8 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use crate::partition::state_machine::entries::OnJournalEntryCommand;
-use crate::partition::state_machine::{CommandHandler, Error, StateMachineApplyContext};
+use tracing::{debug, trace};
+
 use restate_storage_api::fsm_table::WriteFsmTable;
 use restate_storage_api::inbox_table::WriteInboxTable;
 use restate_storage_api::invocation_status_table::{
@@ -28,7 +28,10 @@ use restate_types::identifiers::InvocationId;
 use restate_types::invocation::client::CancelInvocationResponse;
 use restate_types::invocation::{InvocationMutationResponseSink, TerminationFlavor};
 use restate_types::journal_v2::CANCEL_SIGNAL;
-use tracing::{debug, trace};
+
+use crate::partition::processor::ProcessorContext;
+use crate::partition::state_machine::entries::OnJournalEntryCommand;
+use crate::partition::state_machine::{CommandHandler, Error, StateMachineApplyContext};
 
 pub struct OnCancelCommand {
     pub invocation_id: InvocationId,
@@ -36,7 +39,7 @@ pub struct OnCancelCommand {
     pub response_sink: Option<InvocationMutationResponseSink>,
 }
 
-impl<'ctx, 's: 'ctx, S> CommandHandler<&'ctx mut StateMachineApplyContext<'s, S>>
+impl<'ctx, 's: 'ctx, S, P> CommandHandler<&'ctx mut StateMachineApplyContext<'s, S, P>>
     for OnCancelCommand
 where
     S: WriteJournalTable
@@ -57,8 +60,9 @@ where
         + WriteVQueueTable
         + WriteLockTable
         + WritePromiseTable,
+    P: ProcessorContext,
 {
-    async fn apply(self, ctx: &'ctx mut StateMachineApplyContext<'s, S>) -> Result<(), Error> {
+    async fn apply(self, ctx: &'ctx mut StateMachineApplyContext<'s, S, P>) -> Result<(), Error> {
         match self.invocation_status {
             is @ InvocationStatus::Invoked(_)
             | is @ InvocationStatus::Suspended { .. }
