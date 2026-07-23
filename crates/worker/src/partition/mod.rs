@@ -624,6 +624,7 @@ where
                     txn.commit().await?;
                     self.ctx.release_applied_lsn();
                     self.leadership_state.handle_actions(&mut self.ctx, action_collector.drain(..))?;
+                    self.ctx.vqueues_mut().try_compact();
                 },
                 result = self.leadership_state.run(&mut self.ctx) => {
                     let action_effects = result?;
