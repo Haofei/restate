@@ -624,6 +624,14 @@ where
                     txn.commit().await?;
                     self.ctx.release_applied_lsn();
                     self.leadership_state.handle_actions(&mut self.ctx, action_collector.drain(..))?;
+
+                    // Compact the vqueues meta cache only after all actions have been processed. This
+                    // is important because the actions can contain vqueue scheduler events that assume
+                    // the existence of meta entries in the cache.
+                    //
+                    // Since we can apply multiple WAL commands before applying the actions we must not
+                    // compact while applying the WAL commands as this could remove vqueue meta entries
+                    // which are required by the scheduler when applying the scheduler events.
                     self.ctx.vqueues_mut().try_compact();
                 },
                 result = self.leadership_state.run(&mut self.ctx) => {
